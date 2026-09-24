@@ -136,6 +136,10 @@ python3 examples/04_mirror_real.py --dry-run
 python3 examples/05_dual_control.py --dry-run
 ```
 
+开了窗口的运行如果在打印 `✅ 完成` **之后**才报 `Segmentation fault (core dumped)`，
+这次运行本身是成功的 —— 那是进程退出阶段的上游 GL 崩溃，不是仿真失败。
+`--no-render` 不受影响，退出码 0。详见开发者指南。
+
 ## API 对照
 
 `litegrip.LiteGrip` 的每一个公开成员都在 `MujocoGripper` 上存在，名字与含义相同。

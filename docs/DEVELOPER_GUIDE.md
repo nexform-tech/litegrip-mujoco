@@ -191,6 +191,42 @@ So the examples `close()` first, then `release_fixture()`. After that the part h
 alone — which is what makes it a real end-to-end grasp test rather than a torque-derived number.
 `open()` drops it to the floor at `z = -0.065` (floor `-0.08` + half-height 15 mm).
 
+## The viewer and the threading model
+
+The physics runs in a background thread (`litegrip_sim`) started by `connect()`. One RLock guards
+every touch of `MjData`. Three rules follow, and breaking any of them produces a failure that is
+*intermittent*, which is exactly why they are written down:
+
+**1. Create the viewer before starting the sim thread.** `launch_passive()` calls
+`mj_forward(model, data)` on your `MjData` internally. If the sim thread is already stepping that
+same data, two threads enter its arena at once, `mj_makeConstraint` cannot grow it, and you get
+`mj_makeConstraint: nefc under-allocation` — or, more often, a segfault. This was a real bug here:
+`_open_viewer()` used to call `connect()` first. It is fixed, and
+`test_no_sim_thread_when_viewer_is_created` fails if it comes back.
+
+**2. Call `sync()` inside the lock.** `sync()` copies `MjData` into the viewer's internal copy.
+The main thread's `close()`/`goto()` ramp loops also step `MjData` under the lock, so a `sync()`
+outside it races them — the same disease as rule 1. `litearm-mujoco` does it this way too.
+
+**3. Do not close the viewer while the sim thread is alive.** `disconnect()` sets
+`_running = False`, detaches the viewer so the loop can no longer sync it, joins the thread, and
+closes the viewer **only if the thread actually exited**. If the join times out the thread may be
+wedged inside `sync()`, and closing the window under it races for `MjData`. Better to leak a
+window into process teardown than to segfault there.
+
+### What is *not* fixable here
+
+On some Linux setups — Wayland with a remote-desktop session and the NVIDIA proprietary driver is
+the observed one — a process that opened a MuJoCo viewer can **core-dump during interpreter
+shutdown**, after all work is done and printed. This reproduces with bare MuJoCo, an inline box
+model and no code from this repository, both with and without `viewer.close()`, so it is upstream
+and environmental. `--no-render` is not affected and exits 0.
+
+The symptom is confusing: the example prints `✅ 完成` and *then* the shell reports
+`Segmentation fault (core dumped)`. If you see that, the run succeeded; the crash is teardown.
+A non-empty `MUJOCO_GL` (`egl` or `glfw`) sometimes changes whether it happens, and a `0x502`
+warning on startup is likewise only a warning.
+
 ## Uncalibrated free parameters
 
 **The URDF contains no friction data.** Everything below is a conservative placeholder, not a

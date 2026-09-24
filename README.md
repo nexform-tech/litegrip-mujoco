@@ -140,6 +140,10 @@ python3 examples/04_mirror_real.py --dry-run
 python3 examples/05_dual_control.py --dry-run
 ```
 
+If a run that opened the viewer ends with `Segmentation fault (core dumped)` **after** printing
+`✅ 完成`, the run itself succeeded — that is an upstream GL teardown crash at process exit, not a
+simulation failure. `--no-render` is unaffected and exits cleanly. See the developer guide.
+
 ## API Reference
 
 Every public member of `litegrip.LiteGrip` exists on `MujocoGripper` with the same name and

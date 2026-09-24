@@ -179,6 +179,38 @@ ctrl = kp·(θ_des − θ) + kd·(−θ̇) + τ_ff
 这才使它成为真正的端到端抓取验证，而不是一个由力矩推算出来的数字。
 `open()` 会让它掉到 `z = -0.065`（地板 `-0.08` + 半高 15 mm）。
 
+## 查看器与线程模型
+
+物理跑在 `connect()` 起的后台线程（`litegrip_sim`）里，一把 RLock 守着对 `MjData` 的每一次
+访问。由此有三条规则，破任何一条的表现都是**间歇性**故障 —— 正因如此才要写下来：
+
+**1. 先建查看器，再启动仿真线程。** `launch_passive()` 内部会对你的 `MjData` 调
+`mj_forward(model, data)`。如果仿真线程已经在 `mj_step()` 同一份数据，两个线程会同时进它的
+arena，`mj_makeConstraint` 无法扩容，于是报
+`mj_makeConstraint: nefc under-allocation` —— 更常见的是直接段错误。这里曾经真犯过：
+`_open_viewer()` 原先先调 `connect()`。已修，`test_no_sim_thread_when_viewer_is_created`
+会在它复发时失败。
+
+**2. `sync()` 必须在锁里调。** `sync()` 会把 `MjData` 拷进查看器内部的副本，而主线程的
+`close()`/`goto()` 斜坡循环也在锁里 mj_step，放在锁外就是两个线程一起碰同一份 `MjData` ——
+和规则 1 是同一种病。`litearm-mujoco` 也是这么写的。
+
+**3. 仿真线程还活着时不要关查看器。** `disconnect()` 先置 `_running = False`，再把查看器摘下来
+（循环就拿不到了），然后 join 线程，**只有线程确实退出才关窗**。join 超时说明它可能正卡在
+`sync()` 里，此时关窗会和它抢 `MjData`。宁可把窗口漏给进程退出，也不要在这里段错误。
+
+### 这里管不了的部分
+
+在某些 Linux 环境下 —— 已确认的一种是「Wayland + 远程桌面 + NVIDIA 专有驱动」——
+开过 MuJoCo 查看器的进程可能在**解释器退出阶段核心转储**，而且是在所有活儿干完、结果都打印
+出来之后。用裸 MuJoCo、内联 box 模型、不含本仓库任何代码也能复现，`viewer.close()` 关与不关
+都能复现，所以这是上游 + 环境的问题。`--no-render` 不受影响，退出码 0。
+
+症状很迷惑：例程打印完 `✅ 完成`，**然后** shell 才报
+`Segmentation fault (core dumped)`。看到这个说明这次运行是成功的，崩的是退出阶段。
+设一个非空的 `MUJOCO_GL`（`egl` 或 `glfw`）有时能改变它发不发生；启动时那句 `0x502`
+同样只是警告。
+
 ## 未标定的自由参数
 
 **URDF 里没有任何摩擦数据。** 下表全是保守占位值，不是实测。在真机上相信绝对力
