@@ -229,3 +229,7 @@ recordings/
 # 例程产物
 examples/trajectory.json
 examples/*_calibration.json
+
+# MuJoCo 的错误日志：一旦有 GL 警告或引擎报错就写在**当前工作目录**，
+# 跑一次例程就可能冒出来。是产物，不是源码。
+MUJOCO_LOG.TXT
