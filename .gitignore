@@ -225,3 +225,7 @@ recordings/
 *.mp4
 *.bag
 *.mcap
+
+# 例程产物
+examples/trajectory.json
+examples/*_calibration.json
