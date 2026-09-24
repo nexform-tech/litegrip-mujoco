@@ -24,7 +24,10 @@ import pytest
 
 import mujoco
 from litegrip_mujoco import MujocoGripper, constants as C
-from litegrip_mujoco._litegrip._fallback import NotInitializedError
+# 从 shim 取，不要从 _fallback 取：装了 SDK 之后 shim 会把这个名字解析成
+# `litegrip.exceptions.NotInitializedError`，而 _fallback 里那个是**另一个类对象**。
+# 名字一样不代表 `except` 接得住 —— 这条正是对等性的要点。
+from litegrip_mujoco._litegrip import NotInitializedError
 from litegrip_mujoco.gripper import _resolve_model_path
 
 
@@ -469,6 +472,27 @@ class TestLifecycle:
             pytest.skip("litegrip SDK 未安装")
         for name in ("LiteGripError", "NotInitializedError"):
             assert name in sdk_exc, f"SDK 里没有 {name}"
+
+        # 同名还不够，必须是**同一个类对象**。真机上 `except litegrip.LiteGripError`
+        # 要能接住仿真抛出的异常，靠的就是 shim 把这个名字指向 SDK 的类。
+        import litegrip as _sdk_pkg
+
+        from litegrip_mujoco import _litegrip as shim
+
+        assert shim.HAS_SDK
+        assert shim.NotInitializedError is _sdk_pkg.NotInitializedError, (
+            "shim 没有把 NotInitializedError 解析到 SDK 的类上 —— "
+            "两侧的 except 子句会各接各的"
+        )
+
+        # 抛出来的那个必须就是它。上面 test_requires_connect 用 pytest.raises
+        # 验的是同一个契约，这里再钉一次抛出侧，防止实现改回本地异常类。
+        g = MujocoGripper(render=False)
+        try:
+            with pytest.raises(_sdk_pkg.NotInitializedError):
+                g.get_position()
+        finally:
+            g.disconnect()
 
     def test_bad_model_path(self):
         with pytest.raises((FileNotFoundError, ValueError)):
