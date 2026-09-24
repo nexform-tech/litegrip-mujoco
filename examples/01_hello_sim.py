@@ -12,6 +12,9 @@
 ⚠ 注意这里没有 `close()` 释放资源这回事 —— `close()` 是**合拢夹爪**，
   与真机 SDK 同名同义。释放资源用 `disconnect()`。
 
+前置（只做一次 · 在仓库根目录）:
+  pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
+
 运行:
   python3 examples/01_hello_sim.py
   python3 examples/01_hello_sim.py --no-render     # 无图形环境

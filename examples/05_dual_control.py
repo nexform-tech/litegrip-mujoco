@@ -23,6 +23,9 @@
 
 ⚠ ``close()`` 是**合拢夹爪**，不是释放资源。释放资源用 ``disconnect()``。
 
+前置（只做一次 · 在仓库根目录）:
+  pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
+
 运行（无硬件，用虚拟夹爪顶替真机）:
   python3 examples/05_dual_control.py --dry-run
 

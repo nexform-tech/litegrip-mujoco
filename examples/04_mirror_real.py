@@ -19,6 +19,9 @@
   指的是完全不同的开度，直接对拷必然错位。`frac_open ∈ [0,1]` 是唯一与
   标定口径无关的量，所以跨设备只交换它。
 
+前置（只做一次 · 在仓库根目录）:
+  pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
+
 运行（无硬件，用虚拟夹爪顶替真机）:
   python3 examples/04_mirror_real.py --dry-run
   python3 examples/04_mirror_real.py --dry-run --noise      # 带传感器噪声

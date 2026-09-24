@@ -29,6 +29,9 @@
      那是指爪顶着硬限位，位置环在跟一个推不动的目标较劲。只有夹稳之后，
      目标=当前位置、位置误差归零，力矩才真的等于请求值。
 
+前置（只做一次 · 在仓库根目录）:
+  pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
+
 运行:
   python3 examples/02_move_sim.py
   python3 examples/02_move_sim.py --no-render

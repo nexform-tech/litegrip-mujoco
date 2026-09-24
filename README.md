@@ -130,6 +130,9 @@ semantics — including the ones that surprise people. See **Known behaviour** b
 | `05_dual_control.py` | One command drives both simulation and hardware | `--dry-run` |
 
 ```bash
+# Run from the repository root, after `pip install -e ".[dev]"` — the examples
+# import litegrip_mujoco, and a src-layout package is not importable until it
+# is installed.
 python3 examples/01_hello_sim.py
 python3 examples/02_move_sim.py
 python3 examples/03_trajectory.py

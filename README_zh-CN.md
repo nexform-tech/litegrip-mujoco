@@ -127,6 +127,8 @@ dual.disconnect()           # 注意：close() 是合拢夹爪，不是释放资
 | `05_dual_control.py` | 同一条指令同时下发仿真与真机 | `--dry-run` |
 
 ```bash
+# 在仓库根目录跑，且先 `pip install -e ".[dev]"` —— 例程 import 的是
+# litegrip_mujoco，而 src 布局的包没装上是 import 不到的。
 python3 examples/01_hello_sim.py
 python3 examples/02_move_sim.py
 python3 examples/03_trajectory.py

@@ -22,6 +22,9 @@
   ``max_stroke_mm`` 一致时才是同一个物理位置；要跨设备（真机 ↔ 仿真）复现，
   请改用无量纲开度 ``frac_open``（见 examples/04_mirror_real.py）。
 
+前置（只做一次 · 在仓库根目录）:
+  pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
+
 运行:
   python3 examples/03_trajectory.py                      # 录制 → 存盘 → 回放
   python3 examples/03_trajectory.py --no-render
