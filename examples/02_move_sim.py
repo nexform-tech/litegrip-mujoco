@@ -47,9 +47,12 @@ def hdr(text):
 
 
 def open_sim(model, no_render):
-    """连一台仿真；开不出窗口就退回无窗口。"""
-    gripper = MujocoGripper(model_path=model, render=not no_render)
+    """连一台仿真；开不出窗口就退回无窗口。
+
+    构造必须在 try 里面 —— ``render=True`` 时查看器就是在构造函数里开的。
+    """
     try:
+        gripper = MujocoGripper(model_path=model, render=not no_render)
         gripper.connect()
     except RuntimeError as exc:
         print(f"  [警告] {exc} → 改为无窗口运行")

@@ -154,8 +154,9 @@ def main():
     ap.add_argument("--loop", type=int, default=1, help="回放遍数")
     args = ap.parse_args()
 
-    gripper = MujocoGripper(render=not args.no_render)
+    # 构造也要在 try 里面：render=True 时查看器就是在构造函数里开的。
     try:
+        gripper = MujocoGripper(render=not args.no_render)
         gripper.connect()
     except RuntimeError as exc:
         print(f"[警告] {exc} → 改为无窗口运行")

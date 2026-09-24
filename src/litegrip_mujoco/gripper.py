@@ -291,15 +291,19 @@ class MujocoGripper:
         """
         self._running = False
         self._abort.set()
+        # 先把查看器摘下来：仿真线程拿不到它，下一轮就不会再 sync()。
+        viewer, self._viewer = self._viewer, None
         thread, self._thread = self._thread, None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
-        if self._viewer is not None:
+        # join 超时就说明线程可能正卡在 sync() 里。此时关查看器会和它抢
+        # mjData —— 宁可把窗口留给进程退出时回收，也不要制造一个
+        # "退出瞬间段错误"。实测这个崩溃在 Wayland + 远程桌面下很常见。
+        if viewer is not None and (thread is None or not thread.is_alive()):
             try:
-                self._viewer.close()
+                viewer.close()
             except Exception:
                 pass
-            self._viewer = None
         self._connected = False
         self._enabled = False
         self._status_flags = GripperStatus.NONE
@@ -966,11 +970,17 @@ class MujocoGripper:
         while self._running:
             with self._lock:
                 self._tick(dt)
-            if self._viewer is not None:
-                try:
-                    self._viewer.sync()
-                except Exception:
-                    self._viewer = None
+                # sync() 必须和 mj_step() 在同一把锁里：sync() 会把 mjData
+                # 拷给查看器内部的副本，而主线程的 close()/goto() 斜坡循环
+                # 同样在锁内 mj_step。放在锁外就是两个线程一起碰 mjData，
+                # 与 _open_viewer 里那个顺序 bug 是同一种病。
+                viewer = self._viewer
+                if viewer is not None:
+                    try:
+                        if viewer.is_running():
+                            viewer.sync()
+                    except Exception:
+                        self._viewer = None
             if self._realtime:
                 deadline += dt
                 slack = deadline - time.monotonic()
@@ -1086,15 +1096,32 @@ class MujocoGripper:
             setattr(self, attr, current + (target - current) * dt / tau_thermal)
 
     def _open_viewer(self) -> None:
-        try:
-            import mujoco.viewer
-            if not self._connected:
-                self.connect()
-            self._viewer = mujoco.viewer.launch_passive(self._model, self._data)
-        except Exception as exc:
-            raise RuntimeError(
-                f"打不开 MuJoCo 查看器（需要图形环境）：{exc}"
-            ) from exc
+        """打开被动查看器。**不会**顺手启动仿真线程。
+
+        ⚠ 顺序是这个方法的全部要点：查看器必须在**仿真线程启动之前**建好。
+
+        ``mujoco.viewer.launch_passive()`` 内部会对同一个 ``mjData`` 调
+        ``mj_forward()``（见 mujoco/viewer.py 的 launch_passive），而
+        ``_sim_loop`` 同时在 ``mj_step()`` 同一个 mjData。两个线程同时进
+        mjData 的 arena，MuJoCo 就没法给它扩容，于是
+        ``mj_makeConstraint: nefc under-allocation`` —— 运气差的时候不是报错
+        而是直接段错误。
+
+        这个 bug 曾经藏在这里：原先先 ``connect()`` 起线程、再
+        ``launch_passive()``，两者必然重叠。表现是**间歇性**的（碰不上就没事），
+        实测三次里崩一次、崩的位置每次不同，所以尤其容易被当成"环境问题"。
+        查看器只建窗口，连不连由调用方决定。
+        """
+        with self._lock:
+            if self._viewer is not None:
+                return
+            try:
+                import mujoco.viewer
+                self._viewer = mujoco.viewer.launch_passive(self._model, self._data)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"打不开 MuJoCo 查看器（需要图形环境）：{exc}"
+                ) from exc
 
     def _check_connected(self) -> None:
         if not self._connected:

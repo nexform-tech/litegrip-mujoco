@@ -33,8 +33,10 @@ def main():
     args = ap.parse_args()
 
     model = "scene.xml" if args.scene else None
-    gripper = MujocoGripper(model_path=model, render=not args.no_render)
+    # 构造也要在 try 里面：render=True 时查看器就是在构造函数里开的，
+    # 把构造留在外面这个兜底根本兜不住 —— 窗口开不出来会直接抛出去。
     try:
+        gripper = MujocoGripper(model_path=model, render=not args.no_render)
         gripper.connect()
     except RuntimeError as exc:
         print(f"[警告] {exc}\n[警告] 改为无窗口运行")

@@ -130,16 +130,27 @@ def main():
         print(f"  真机 = litegrip.LiteGrip(channel={args.channel!r},"
               f" can_id={args.can_id:#04x})")
 
-    dual = DualGripper(
-        channel=args.channel,
-        can_id=args.can_id,
-        mst_id=args.mst_id,
-        render=not args.no_render,
-        mirror_first=not args.no_mirror_first,
-        dry_run=args.dry_run,
-    )
-    try:
+    # 构造也要在 try 里面：render=True 时查看器就是在 DualGripper() 里
+    # 顺带开的，把构造留在外面这个兜底根本兜不住。
+    def build(render):
+        dual = DualGripper(
+            channel=args.channel,
+            can_id=args.can_id,
+            mst_id=args.mst_id,
+            render=render,
+            mirror_first=not args.no_mirror_first,
+            dry_run=args.dry_run,
+        )
         dual.start()
+        return dual
+
+    try:
+        dual = build(not args.no_render)
+    except RuntimeError as exc:
+        print(f"  [警告] {exc} → 改为无窗口运行")
+        dual = build(False)
+
+    try:
         print(f"  {dual!r}")
         print("  已使能，并已把仿真对齐到真机当前开度。")
         run(dual)

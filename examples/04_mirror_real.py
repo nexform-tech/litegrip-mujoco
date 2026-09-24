@@ -126,8 +126,9 @@ def main():
 
     hdr("[1] 建立设备")
     real = make_real(args)
-    sim = MujocoGripper(render=not args.no_render)
+    # 构造也要在 try 里面：render=True 时查看器就是在构造函数里开的。
     try:
+        sim = MujocoGripper(render=not args.no_render)
         sim.connect()
     except RuntimeError as exc:
         print(f"  [警告] {exc} → 改为无窗口运行")

@@ -13,7 +13,10 @@
 """
 from __future__ import annotations
 
+import sys
+import threading
 import time
+import types
 from typing import List
 
 import numpy as np
@@ -477,6 +480,149 @@ class TestLifecycle:
         g.disconnect()
         g.disconnect()
         assert not g.is_connected
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 查看器的生命周期
+#
+# 这一组**不需要显示环境**：mujoco.viewer 被替换成假模块，所以 CI 上也能跑。
+# 被测的是顺序与所有权，不是渲染本身。
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class _FakeViewer:
+    """够用的假查看器：只记录被 sync/close 过没有。"""
+
+    def __init__(self):
+        self.synced = 0
+        self.closed = False
+        self.running = True
+
+    def is_running(self) -> bool:
+        return self.running
+
+    def sync(self) -> None:
+        self.synced += 1
+
+    def close(self) -> None:
+        self.closed = True
+        self.running = False
+
+
+class TestViewerLifecycle:
+    """查看器必须在仿真线程**启动之前**建好。
+
+    `launch_passive()` 内部会对同一个 mjData 调 `mj_forward()`，而 `_sim_loop`
+    同时在 `mj_step()` 同一个 mjData。两者重叠会让 mjData 的 arena 无法扩容，
+    报 `mj_makeConstraint: nefc under-allocation`，更糟时直接段错误 —— 而且
+    是间歇性的（碰不上就没事），所以必须有测试钉住顺序，不能靠"跑一次没崩"。
+    """
+
+    @staticmethod
+    def _install(monkeypatch, record: List[List[str]]):
+        """把 mujoco.viewer 换成假模块，记录调用时活着的仿真线程。
+
+        ``sys.modules`` 和 ``mujoco.viewer`` 属性都要换：``import mujoco.viewer``
+        之后代码访问的是 ``mujoco.viewer`` 这个**属性**，只塞 sys.modules 不够。
+        """
+        mod = types.ModuleType("mujoco.viewer")
+
+        def launch_passive(model, data, **kwargs):
+            record.append(
+                [t.name for t in threading.enumerate() if t.name == "litegrip_sim"]
+            )
+            return _FakeViewer()
+
+        mod.launch_passive = launch_passive
+        monkeypatch.setitem(sys.modules, "mujoco.viewer", mod)
+        monkeypatch.setattr(mujoco, "viewer", mod, raising=False)
+
+    def test_no_sim_thread_when_viewer_is_created(self, monkeypatch):
+        """回归：建窗口时不允许已经有仿真线程在跑。"""
+        seen: List[List[str]] = []
+        self._install(monkeypatch, seen)
+
+        g = MujocoGripper(render=True)
+        try:
+            assert len(seen) == 1, "查看器没有被建出来"
+            assert seen[0] == [], (
+                f"建查看器时已经有仿真线程在跑：{seen[0]} —— "
+                "launch_passive 的 mj_forward 会和 _sim_loop 的 mj_step 抢 mjData"
+            )
+        finally:
+            g.disconnect()
+
+    def test_render_does_not_imply_connected(self, monkeypatch):
+        """``render=True`` 只开窗，不代替 ``connect()``。"""
+        self._install(monkeypatch, [])
+        g = MujocoGripper(render=True)
+        try:
+            assert not g.is_connected
+            assert g._viewer is not None
+            g.connect()
+            assert g.is_connected
+        finally:
+            g.disconnect()
+
+    def test_launch_viewer_is_idempotent(self, monkeypatch):
+        """重复开窗不会把旧窗口漏掉（旧窗口会变成没人 sync 的孤儿）。"""
+        seen: List[List[str]] = []
+        self._install(monkeypatch, seen)
+        g = MujocoGripper(render=True)
+        try:
+            g.launch_viewer()
+            g.launch_viewer()
+            assert len(seen) == 1
+        finally:
+            g.disconnect()
+
+    def test_disconnect_closes_viewer(self, monkeypatch):
+        """正常路径：线程退干净了就关窗。"""
+        self._install(monkeypatch, [])
+        g = MujocoGripper(render=True)
+        g.connect()
+        viewer = g._viewer
+        g.disconnect()
+        assert viewer.closed
+
+    def test_disconnect_skips_close_when_thread_wedged(self, monkeypatch):
+        """线程卡住时**不要**关窗。
+
+        join 超时说明它可能正卡在 ``sync()`` 里，此时关窗会和它抢 mjData，
+        制造一个"退出瞬间段错误"。宁可把窗口留给进程退出回收。
+        """
+        self._install(monkeypatch, [])
+        wedged = threading.Event()
+
+        def wedged_loop(self):  # 无视 _running，永不退出
+            wedged.wait(timeout=10.0)
+
+        monkeypatch.setattr(MujocoGripper, "_sim_loop", wedged_loop)
+        g = MujocoGripper(render=True)
+        g.connect()
+        viewer = g._viewer
+        try:
+            g.disconnect()
+            assert not viewer.closed, (
+                "线程还活着就关窗 —— 这会在退出瞬间和 sync() 抢 mjData"
+            )
+        finally:
+            wedged.set()
+            g.disconnect()
+
+    def test_viewer_failure_raises_runtimeerror(self, monkeypatch):
+        """开不出窗口要抛 RuntimeError，例程靠它退回无窗口。"""
+        mod = types.ModuleType("mujoco.viewer")
+
+        def launch_passive(model, data, **kwargs):
+            raise mujoco.FatalError("no GL context")
+
+        mod.launch_passive = launch_passive
+        monkeypatch.setitem(sys.modules, "mujoco.viewer", mod)
+        monkeypatch.setattr(mujoco, "viewer", mod, raising=False)
+
+        with pytest.raises(RuntimeError):
+            MujocoGripper(render=True)
 
 
 class TestState:
