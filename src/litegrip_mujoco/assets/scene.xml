@@ -1,0 +1,71 @@
+<!--
+  scene.xml — 演示场景：LiteGrip 夹爪 + 地板 + 一个被"供料器"托住的工件。
+
+  litegrip.xml 是纯粹的夹爪模型（2 个自由度，无外部物体），适合做动力学与单位
+  换算的基准。本文件在它外面套一个可玩的世界，供例程使用::
+
+      MujocoGripper(model_path=".../scene.xml")
+
+  ════════════════════════════════════════════════════════════════════════
+  为什么工件是"焊"住的，而不是放在台面上
+  ════════════════════════════════════════════════════════════════════════
+
+  夹爪是固定安装的（base_link 焊在世界系），不能移动去"够"工件，所以工件必须
+  一开始就在两指之间。但"放在台面上"对这个夹爪在几何上**不可能**：
+
+  对右指 STL 逐层扫描内侧面（world_x = -0.067 + mesh_x_max + q）得到，完全闭合
+  时两指内侧在 z ∈ [0.024, 0.109] 的**全部高度**上都收敛到 |x| ≈ 0.0008~0.0045。
+  也就是说指爪的整个纵向范围内都没有一条可供支柱通过的空隙——任何放在 x=0 附近
+  的支撑物都会被合拢的指爪撞上。实测数据留档在 tests/test_mujoco_gripper.py。
+
+  所以工件由一个 `<weld>` 等式（"供料器/夹具"）托住。例程里先 `close()` 夹紧、
+  再 `release_fixture()` 解除夹具——之后工件**只靠摩擦**留在指间，这正好是对
+  抓取力的一次真实验证。`open()` 则让它落到地板上。
+
+  ════════════════════════════════════════════════════════════════════════
+  其它
+  ════════════════════════════════════════════════════════════════════════
+
+  · 地板 z=-0.08 刻意低于本体底面（base_link 最低处 z=-0.0641），避免重叠。
+  · 工件是 20×20×30 mm 的方块，落在夹持面中心。夹持碰撞面在 base_link 系中
+    z ∈ [0.080941, 0.112529]，y 半宽 11.9595 mm，故 20 mm 见方的工件四周各留
+    约 2 mm 余量。对应的闭合位置 q = (87.000-20)/2000 = 0.033500 m。
+-->
+<mujoco model="litegrip_scene">
+  <include file="litegrip.xml" />
+
+  <asset>
+    <material name="mat_floor" rgba="0.32 0.34 0.37 1" />
+    <material name="mat_object" rgba="0.95 0.55 0.15 1" />
+  </asset>
+
+  <worldbody>
+    <geom name="floor" type="plane" pos="0 0 -0.08" size="0.6 0.6 0.01"
+          material="mat_floor" contype="1" conaffinity="1"
+          condim="3" friction="0.8 0.02 0.0001" />
+
+    <light name="light1" pos="0.4 0.4 0.6" directional="true" />
+    <light name="light2" pos="-0.4 -0.4 0.4" directional="true" />
+
+    <!-- 工件：20×20×30 mm，质心在夹持面中心 z=0.096735。裸方块密度 1000 kg/m³
+         → 质量 12 g，重量 0.118 N，远小于夹持摩擦所能提供的上限。 -->
+    <body name="object" pos="0 0 0.096735">
+      <freejoint name="object_free" />
+      <geom name="object_geom" type="box" size="0.010 0.010 0.015"
+            material="mat_object" contype="1" conaffinity="1"
+            condim="4" friction="0.7 0.02 0.0001"
+            solimp="0.98 0.999 0.001" solref="0.002 1" />
+    </body>
+  </worldbody>
+
+  <!-- 供料夹具。默认 active；例程用 release_fixture() 把它关掉。
+       省略 body2 即焊到世界系。weld 的 solref 取默认（很硬）。 -->
+  <equality>
+    <weld name="fixture" body1="object" active="true" />
+  </equality>
+
+  <keyframe>
+    <!-- 指爪张开、工件由夹具托在两指之间：这就是夹具工位的初始状态。 -->
+    <key name="fixture" qpos="0.00001 0.00001 0 0 0.096735 1 0 0 0" />
+  </keyframe>
+</mujoco>

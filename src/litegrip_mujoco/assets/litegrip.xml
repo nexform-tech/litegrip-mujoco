@@ -1,0 +1,201 @@
+<!--
+  litegrip.xml — LiteGrip 平行两指夹爪的 MuJoCo 模型。
+
+  几何、惯量、关节原点全部取自 litegrip-urdf/urdf/litegrip_urdf.urdf.xacro
+  与同目录的三个 STL 网格，未作改动。单位：米 / 弧度 / 千克。
+
+  ════════════════════════════════════════════════════════════════════════
+  关节约定（与 URDF 一致，反直觉，务必注意）
+  ════════════════════════════════════════════════════════════════════════
+
+  两个指关节的**轴向相反**：右指 axis=+X，左指 axis=-X。
+
+  因此**两个关节取同一个值**才是两指对称运动；按"一正一负"的直觉写控制
+  器会让两指反向运动（一个进一个出）。
+
+    q = 0                 两指内侧面位于 x = ±0.0435，完全张开（开口 87.000 mm）
+    q = 0.042726          完全闭合（网格几何给出的开口为 1.548 mm）
+
+  ════════════════════════════════════════════════════════════════════════
+  行程口径 —— 两处自相矛盾，已知且刻意保留
+  ════════════════════════════════════════════════════════════════════════
+
+  1. URDF 注释给出两个行程：
+       · mesh 理论行程 0.0435 m（两指内侧面恰好贴合于 x=0，零间隙）
+       · 卡尺实测行程 0.042726 m（总机械行程 85.452 mm）
+     本模型取**实测值 0.042726**，因为它才是真实机械硬限位；用 0.0435 会让
+     `close()` 越过物理限位 0.77 mm，并让每一个上报的毫米数都带上固定偏移。
+
+  2. URDF 注释同时给出"张开开口 87.0 mm"与"总行程 85.452 mm"。二者互相
+     矛盾 0.04 mm：87.000 - 85.452 = 1.548 mm，而注释里写的闭合间隙是
+     1.508 mm（那是按实测张开 86.960 mm 算的）。
+     本模型按**网格几何**取值，即闭合时开口恒为 1.548 mm。
+     这是已知差异，不是 bug —— tests/test_mujoco_gripper.py 里有断言锁死它。
+
+  ════════════════════════════════════════════════════════════════════════
+  为什么碰撞体是 box 而不是网格
+  ════════════════════════════════════════════════════════════════════════
+
+  MuJoCo 没有凹网格碰撞：碰撞网格一律先取凸包。实测本夹爪的凸包体积是网格
+  体积的 2.334×（base_link）/ 2.075×（finger），凸化后本体恰好填满指的滑道，
+  于是**任意关节值下都恒定产生 6 个 base↔finger 接触、5.25 mm 穿透**。
+  这不是调参能救的，是结构性的。
+
+  所以：视觉用原始 STL 网格，碰撞用两个 box 代理（滑座 + 夹持面）。
+  夹持面 box 的 +x 面精确落在网格的 x = 0.0235，即 q=0 时的世界坐标
+  x = -0.067 + 0.0235 = -0.0435 —— 87.000 mm 开口因而是精确的。
+  本体不加碰撞体（与 litearm7.xml 的做法一致）。
+
+  ⚠ MuJoCo 会在编译期对网格做主轴对齐（mesh_pos / mesh_quat），并把 geom 的
+    默认 pos/quat 设成同一个变换来抵消它。所以网格 geom **不要**手写 pos/quat，
+    否则会覆盖掉这个补偿、把零件转歪。当前 URDF 的视觉原点本就是 xyz=0 rpy=0，
+    因此省略即可。tests 里有回归断言守住这一点。
+
+  ════════════════════════════════════════════════════════════════════════
+  待标定的自由参数
+  ════════════════════════════════════════════════════════════════════════
+
+  URDF 里**没有任何摩擦数据**。下面的 friction / solref / solimp / damping /
+  frictionloss 全是保守初值，不是测量值，接真机前应当标定。
+  friction="0.9 0.02 0.0001" 里的 0.9 是按硅胶/TPU 夹持垫对塑料的量级取的。
+
+  solref="0.002 1" 也是选的，不是量的。它决定夹持面有多"软"，进而决定
+  grasp(force_n) 的实际夹持力偏离请求值多少：接触越软，指爪陷进去越深，伺服
+  的位置误差就越大，实际力就越超过 force_n。实测（scene.xml、20 mm 方块）：
+
+      solref      请求 10 N   请求 20 N   请求 40 N   （每指压陷深度）
+      0.006 1      21.84 N     29.33 N     45.61 N     287 / 349 / 442 µm
+      0.002 1      15.51 N     24.86 N     43.59 N      27 /  43 /  75 µm
+      0.001 1      15.51 N     24.86 N     43.59 N      27 /  43 /  75 µm
+
+  再往下加硬就没有收益了 —— 0.001 与 0.002 完全相同，说明此时主导项已经不是
+  接触柔度，而是 SDK `grasp()` 那 5×10 ms 的堵转确认窗口：指爪在窗口里还在
+  往前走，`q_target` 被改写到窗口末尾的位置，于是留下一段固定的位置误差。
+  真机同构（同样的 5 cycles × 10 ms），所以这个"实际力 > 请求力"是**照抄**来的
+  行为，不是仿真缺陷。力对 force_n 仍是单调的，可当带偏置的开环力控用。
+-->
+<mujoco model="litegrip">
+  <compiler angle="radian" eulerseq="XYZ" autolimits="true" />
+
+  <!--
+    timestep=0.001：实测 dt=2ms 时 kd>=5 会不收敛，dt=1ms 全稳。
+    cone="elliptic"：MuJoCo 默认 pyramidal 会高估摩擦各向异性，让抓取在旋转下
+    看起来不对。
+    integrator="implicitfast"：隐式积分关节阻尼与 armature，这是刚性控制回路
+    能在 dt=1ms 下稳定的前提。
+  -->
+  <option timestep="0.001" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic" />
+
+  <default>
+    <!--
+      armature=0.85 不是可选项。DM4310 转子惯量约 1.2e-5 kg·m²，经约 10:1 减速
+      后折算 1.2e-3 kg·m²；丝杠 dθ/dx = 26.68 rad/m，故折算质量为
+      1.2e-3 × 26.68² ≈ 0.85 kg —— 是指自身质量 0.0355 kg 的 24 倍。
+      缺了它，实测 vmax 冲到 2.93 m/s 且 1 s 后仍停在 q=0.0399 不收敛。
+    -->
+    <joint type="slide" limited="true" damping="0.05" frictionloss="0.02" armature="0.85" />
+    <geom contype="1" conaffinity="1" condim="4"
+          solimp="0.98 0.999 0.001" solref="0.002 1"
+          friction="0.9 0.02 0.0001" />
+    <!-- gear=10 让 data.ctrl 的数值就等于 SDK 的 tau(Nm)；见下方 actuator 段。 -->
+    <motor ctrllimited="true" forcelimited="true" gear="10" />
+  </default>
+
+  <asset>
+    <mesh name="base_link" file="meshes/base_link.STL" />
+    <mesh name="finger_right_mesh" file="meshes/gripper_slider_link1.STL" />
+    <mesh name="finger_left_mesh" file="meshes/gripper_slider_link2.STL" />
+    <material name="mat_base" rgba="0.898 0.918 0.929 1" />
+    <material name="mat_finger" rgba="0.98 0.98 0.98 1" />
+  </asset>
+
+  <worldbody>
+    <!-- 本体：无关节 = 焊接在世界坐标系，0 自由度，无约束开销。 -->
+    <body name="base_link">
+      <!-- 视觉网格；不计碰撞（见文件头说明）。 -->
+      <geom name="base_vis" type="mesh" mesh="base_link" material="mat_base"
+            contype="0" conaffinity="0" />
+
+      <body name="finger_right" pos="-0.067 0.0010833 0.034083">
+        <joint name="gripper_slide_joint_right" axis="1 0 0" range="0 0.042726" />
+        <geom name="finger_right_vis" type="mesh" mesh="finger_right_mesh"
+              material="mat_finger" contype="0" conaffinity="0" />
+        <!-- 滑座：STL 该区域 x∈[-0.00095,0.02195] y∈[-0.0315833,0.0294167] z∈[-0.0135833,0.005] -->
+        <geom name="finger_right_col_body" type="box"
+              pos="0.0105000 -0.0010833 -0.00429165"
+              size="0.0114500 0.0305000 0.00929165" />
+        <!--
+          夹持面：+x 面精确落在网格 x=0.0235 → 世界 x=-0.0435。
+          y 中心 -0.0010833 恰好抵消关节原点的 y 偏移，故在 base_link 系中
+          该面关于 y=0 对称。z 覆盖网格上 x>=0.0230 的全部顶点（含 0.4 mm 内缩）。
+        -->
+        <geom name="finger_right_col_pad" type="box"
+              pos="0.0167500 -0.0010833 0.0626520"
+              size="0.0067500 0.0119595 0.0157940" />
+      </body>
+
+      <!-- 左指是右指的 x/y 双取反（绕 z 轴 180°），不是单纯的 x 镜像。
+           两个 STL 内容不同（md5 27a7b032… vs 34d85dd2…），不可复用同一个文件。 -->
+      <body name="finger_left" pos="0.067 -0.0010833 0.034083">
+        <joint name="gripper_slide_joint_left" axis="-1 0 0" range="0 0.042726" />
+        <geom name="finger_left_vis" type="mesh" mesh="finger_left_mesh"
+              material="mat_finger" contype="0" conaffinity="0" />
+        <geom name="finger_left_col_body" type="box"
+              pos="-0.0105000 0.0010833 -0.00429165"
+              size="0.0114500 0.0305000 0.00929165" />
+        <geom name="finger_left_col_pad" type="box"
+              pos="-0.0167500 0.0010833 0.0626520"
+              size="0.0067500 0.0119595 0.0157940" />
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!--
+      gear=10 使 qfrc_actuator = 10 × ctrl，而 ctrl 的数值即 SDK 的 tau(Nm)。
+      于是 ctrl = force_n × N_TO_NM = force_n × 0.1 就是 SDK 的力矩前馈，
+      没有任何隐藏系数。已验证：tau_ff 取 force_n=10/20/40 时，每指接触力为
+      9.965 / 19.929 / 39.859 N。
+
+      ctrlrange=±10 对应 DM4310 的 TAU_MAX=10 Nm（litegrip/constants.py），
+      即由真实电机决定的力矩上限；forcerange=±100 N 是经 gear 后的指端力上限。
+    -->
+    <motor name="motor_right" joint="gripper_slide_joint_right"
+           ctrlrange="-10 10" forcerange="-100 100" />
+    <motor name="motor_left" joint="gripper_slide_joint_left"
+           ctrlrange="-10 10" forcerange="-100 100" />
+  </actuator>
+
+  <!--
+    两指**刚性耦合** q_right = q_left。
+
+    真机是**一台** DM4310 经连杆/齿轮齿条同时驱动两指（SDK 只上报一个
+    `position_rad` 就是证据），两指不可能独立运动。URDF 用两个滑动关节描述
+    运动学，耦合是隐含在机构里的，必须在 MJCF 里补出来——否则这个模型描述的
+    是一台**双电机**夹爪：夹偏心工件时两指会各自退让、不去把工件拨正，抓取
+    行为与真机不同。
+
+    对称抓取时该约束的约束力恒为零，因此不影响已验证的数值（87.000 mm 开口、
+    每指 10 N 夹持力等）。它只在非对称工况下起作用 —— 那正是需要它的地方。
+
+    取刚性（polycoef 一次项）是理想化：真实连杆有柔性，但 URDF 里没有任何
+    连杆刚度数据，无从标定，故按刚性建模并在文档里标明。
+  -->
+  <equality>
+    <joint name="finger_coupling" joint1="gripper_slide_joint_right"
+           joint2="gripper_slide_joint_left" polycoef="0 1 0 0 0" />
+  </equality>
+
+  <statistic center="0 0 0.04" extent="0.15" />
+
+  <!--
+    home = closed，与 SDK 的 home()／pos_closed_rad 语义一致。
+    张开位刻意偏离限位 1e-5：正好坐在 range 边界上会触发限位约束，其 solref
+    参考加速度项会注入一个很小的虚假力。
+  -->
+  <keyframe>
+    <key name="open" qpos="0.00001 0.00001" />
+    <key name="closed" qpos="0.042726 0.042726" />
+    <key name="home" qpos="0.042726 0.042726" />
+  </keyframe>
+</mujoco>
