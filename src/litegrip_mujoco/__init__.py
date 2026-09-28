@@ -26,6 +26,29 @@ from typing import Any, Optional
 
 from . import constants
 from ._litegrip import HAS_SDK, sdk_unavailable_reason
+from .calibration import (
+    Calibration,
+    CalibrationError,
+    CalibrationFileError,
+    CalibrationRequiredError,
+    CalibrationVerificationError,
+    UncalibratedDeviceError,
+    applied_calibration,
+    apply_calibration,
+    default_calibration_path,
+    describe_candidate,
+    discover_calibrations,
+    format_selection,
+    is_calibrated,
+    is_simulated_device,
+    load_calibration_file,
+    mark_calibrated,
+    require_calibration,
+    require_usable_device,
+    resolve_calibration_path,
+    sdk_factory_calibration_path,
+    select_calibration_for,
+)
 from .dryrun import DryRunGripper
 from .gripper import DEFAULT_MODEL, SCENE_MODEL, MujocoGripper
 from .mirror import DualGripper, MirrorMode, read_frac_open, write_frac_open
@@ -73,6 +96,28 @@ __all__ = [
     "MirrorMode",
     "read_frac_open",
     "write_frac_open",
+    # 标定：真机运动前必须先选定一份标定文件
+    "Calibration",
+    "CalibrationError",
+    "CalibrationFileError",
+    "CalibrationRequiredError",
+    "CalibrationVerificationError",
+    "UncalibratedDeviceError",
+    "applied_calibration",
+    "apply_calibration",
+    "default_calibration_path",
+    "describe_candidate",
+    "discover_calibrations",
+    "format_selection",
+    "is_calibrated",
+    "is_simulated_device",
+    "load_calibration_file",
+    "mark_calibrated",
+    "require_calibration",
+    "require_usable_device",
+    "resolve_calibration_path",
+    "sdk_factory_calibration_path",
+    "select_calibration_for",
     # 无硬件
     "DryRunGripper",
     # 常量与工具

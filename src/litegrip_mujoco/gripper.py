@@ -135,6 +135,11 @@ class MujocoGripper:
             print(g.get_force())           # N
     """
 
+    #: 仿真设备的端点来自模型本身（解析真值），不是标定的产物。
+    #: `litegrip_mujoco.calibration` 靠这个标记豁免真机那套"必须先选标定文件"
+    #: 的强制；第三方仿真后端也应当设上它，或调用 `mark_calibrated()`。
+    IS_SIMULATED = True
+
     def __init__(
         self,
         model_path: Optional[str] = None,

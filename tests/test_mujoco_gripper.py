@@ -1231,7 +1231,7 @@ class TestApiParity:
             return
         sim_only = {"step", "settle", "reset", "release_fixture", "hold_fixture",
                     "gap_mm", "frac_open", "set_frac_open", "launch_viewer",
-                    "sync_viewer", "model", "data", "model_path"}
+                    "sync_viewer", "model", "data", "model_path", "IS_SIMULATED"}
         overlap = sim_only & {n for n in dir(cls) if not n.startswith("_")}
         assert not overlap, f"仿真独有成员与 SDK 撞名: {sorted(overlap)}"
 
@@ -1279,7 +1279,7 @@ class TestCrossDevice:
             assert dry.config.pos_closed_rad != pytest.approx(C.POS_CLOSED_RAD)
             for frac in (0.0, 0.3, 0.75, 1.0):
                 write_frac_open(dry, frac)
-                assert read_frac_open(dry, warn=False) == pytest.approx(frac, abs=1e-3)
+                assert read_frac_open(dry) == pytest.approx(frac, abs=1e-3)
         finally:
             dry.disconnect()
 
@@ -1291,14 +1291,18 @@ class TestCrossDevice:
         dry.connect()
         try:
             write_frac_open(dry, 5.0)
-            assert read_frac_open(dry, warn=False) == pytest.approx(1.0, abs=1e-3)
+            assert read_frac_open(dry) == pytest.approx(1.0, abs=1e-3)
             write_frac_open(dry, -5.0)
-            assert read_frac_open(dry, warn=False) == pytest.approx(0.0, abs=1e-3)
+            assert read_frac_open(dry) == pytest.approx(0.0, abs=1e-3)
         finally:
             dry.disconnect()
 
     def test_read_frac_open_warns_without_calibration(self):
-        """θ 端点不可信时退回 mm 口径并发出 RuntimeWarning。"""
+        """θ 端点不可信时退回 mm 口径并发出 RuntimeWarning。
+
+        这是 `strict=False` 的逃生门；默认（`strict=True`）会直接抛
+        `UncalibratedDeviceError`，见 tests/test_calibration.py。
+        """
         from litegrip_mujoco._litegrip._fallback import GripperConfig
         from litegrip_mujoco.mirror import read_frac_open
         from litegrip_mujoco import DryRunGripper
@@ -1310,7 +1314,7 @@ class TestCrossDevice:
         dry.connect()
         try:
             with pytest.warns(RuntimeWarning):
-                frac = read_frac_open(dry, warn=True)
+                frac = read_frac_open(dry, strict=False)
             assert 0.0 <= frac <= 1.0
         finally:
             dry.disconnect()
