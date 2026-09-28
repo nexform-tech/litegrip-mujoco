@@ -1,27 +1,28 @@
 # litegrip-mujoco
 
-**LiteGrip 平行两指夹爪**的官方 MuJoCo 仿真环境。
-API 与 `litegrip` SDK 完全兼容 —— 把 `LiteGrip` 换成 `MujocoGripper`，
-同一段控制代码在仿真与真机上行为一致。
+**LiteGrip 平行两指夹爪**的官方 MuJoCo 仿真环境，API 与 `litegrip` SDK 完全兼容
+—— 把 `LiteGrip` 换成 `MujocoGripper`，同一段控制代码在仿真与真机上行为一致。
 
-## 特性
+[English](README.md) · **简体中文**
 
-- 🔄 **可直接替换的 API** —— `LiteGrip` 的 44 个公开成员，名字与语义逐一对应。
-- 🖥️ **三种运行模式** —— 独立仿真 / 镜像跟随 / 双控。
-- 🎮 **原生 MuJoCo 渲染** —— 实时显示指爪运动、接触与抓取。
-- 🧪 **不需要硬件** —— 镜像与双控例程带 `--dry-run`，无 CAN 也能跑通全流程。
-- 📏 **真实毫米** —— 行程基准是 URDF 实测几何的 85.452 mm，不是 SDK 名义的 120 mm 刻度。
-- **标定显式选择** —— 任何会让真机动起来的代码，都必须先给一份标定文件。
-  SDK 那种静默回落到出厂常量的行为会被拦下，不会继承。见[标定](#标定)。
+| 属性 | 值 |
+| --- | --- |
+| 产品 | LiteGrip 平行两指夹爪 |
+| 仓库定位 | MuJoCo 仿真环境 |
+| 模型 | 两个平行的移动副手指，各 42.726 mm 行程 |
+| 钳口开度 | 闭合 1.548 mm … 张开 87.000 mm |
+| 行程基准 | 85.452 mm，URDF 实测值 —— 不是 SDK 名义的 120 mm |
+| 物理引擎 | MuJoCo 3.0+，`dt = 1 ms`，θ 空间 PD，增益取自 SDK 本身 |
+| Python | 3.10+ |
 
 ## 安装
 
 ```bash
 # 纯仿真（不需要硬件）
-pip install litegrip-mujoco
+python3 -m pip install litegrip-mujoco
 
 # 镜像 / 双控模式（需要真机 SDK）
-pip install "litegrip-mujoco[mirror]"
+python3 -m pip install "litegrip-mujoco[mirror]"
 ```
 
 从源码安装：
@@ -29,12 +30,10 @@ pip install "litegrip-mujoco[mirror]"
 ```bash
 git clone https://github.com/nexform-tech/litegrip-mujoco.git
 cd litegrip-mujoco
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 ```
 
 ## 快速上手
-
-### 模式 1 —— 独立仿真
 
 ```python
 from litegrip_mujoco import MujocoGripper
@@ -63,7 +62,7 @@ with MujocoGripper(model_path="scene.xml", render=True) as gripper:
     gripper.release_fixture()   # 之后工件只靠摩擦力留在指间
 ```
 
-### 模式 2 —— 镜像（仿真跟随真机）
+### 镜像（仿真跟随真机）
 
 ```python
 from litegrip_mujoco import MujocoGripper, MirrorMode, apply_calibration, require_sdk
@@ -85,7 +84,7 @@ with MujocoGripper(render=True) as sim:
 `apply_calibration()` 必须排在 `connect()` 之后、`enable()` 之前。`enable()` 是第一个
 会给电机上电的调用，标定没载上就必须在它上面被拦下。
 
-### 模式 3 —— 双控（一条指令，两边同时动）
+### 双控（一条指令，两边同时动）
 
 ```python
 from litegrip_mujoco import DualGripper
@@ -221,17 +220,17 @@ SDK 的 `load_calibration(path)` 会构造 `sources = [path, _FACTORY_CALIB]`，
 
 物理模型完全由仓库自带的 URDF 与 STL 网格构建。它建模了**单台** DM4310 电机经刚性
 耦合驱动两指的机构，并复刻了 SDK 的控制语义 —— 包括那些会让人意外的部分，见下方
-"已知行为"。
+「已知行为」。
 
 ## 例程
 
-| 例程 | 内容 | 需要硬件 |
-| --- | --- | :---: |
-| `01_hello_sim.py` | 建立仿真、读状态、开合一次 | ❌ |
-| `02_move_sim.py` | 位置 / 速度 / 力控，以及抓取验证 | ❌ |
-| `03_trajectory.py` | 位置轨迹录制、存盘、加载与回放 | ❌ |
-| `04_mirror_real.py` | 真机开度实时驱动仿真 | `--dry-run`，否则要 `--calibration` |
-| `05_dual_control.py` | 同一条指令同时下发仿真与真机 | `--dry-run`，否则要 `--calibration` |
+| 例程 | 方向 | 需要硬件？ |
+| --- | --- | --- |
+| [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | ——（纯 MuJoCo） | 否 |
+| [`examples/02_move_sim.py`](examples/02_move_sim.py) | 位置 / 速度 / 力控 | 否 |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | 录制、存盘、加载、回放 | 否 |
+| [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | 真机 → 仿真 | `--dry-run`，否则要 `--calibration` |
+| [`examples/05_dual_control.py`](examples/05_dual_control.py) | 一条指令 → 两边 | `--dry-run`，否则要 `--calibration` |
 
 04 与 05 不给 `--dry-run` 时走的是真机，因此必须先给一份标定文件 —— 见[标定](#标定)。
 
@@ -251,7 +250,7 @@ python3 examples/05_dual_control.py --dry-run
 
 ## API 对照
 
-`litegrip.LiteGrip` 的每一个公开成员都在 `MujocoGripper` 上存在，名字与含义相同。
+`litegrip.LiteGrip` 的 44 个公开成员全部都在 `MujocoGripper` 上存在，名字与含义相同。
 
 | `litegrip.LiteGrip` | `MujocoGripper` | 说明 |
 | --- | --- | --- |
@@ -263,9 +262,9 @@ python3 examples/05_dual_control.py --dry-run
 | `move_to(rad)` / `move_at_speed(mm, mm_s)` | 同名 | ✅ 一致 |
 | `grasp(force_n)` | 同名 | ✅ 一致，包括超出请求值的部分 |
 | `set_force(force_n)` | 同名 | ✅ 一致，目标 = 当前位置 |
-| `home()` | 同名 | ⚠️ 见"已知行为" |
-| `get_state()` / `get_position()` / `get_position_rad()` | 同名 | ✅ 一致（见"状态新鲜度"） |
-| `refresh_status(timeout_s)` | 同名 | ✅ 恒 `True` —— 仿真状态随时可读 |
+| `home()` | 同名 | ⚠️ 见「已知行为」 |
+| `get_state()` / `get_position()` / `get_position_rad()` | 同名 | ✅ 一致（见「状态新鲜度」） |
+| `refresh_status(timeout_s)` | 同名 | ✅ 恒返回 `True` —— 仿真状态随时可读 |
 | `get_force()` / `get_torque()` / `get_error()` | 同名 | ✅ 一致 |
 | `get_temperature()` / `get_info()` | 同名 | ✅ 用仿真热模型 |
 | `is_moving()` / `is_grasped()` / `wait_for_ready()` | 同名 | ✅ 一致 |
@@ -291,6 +290,21 @@ python3 examples/05_dual_control.py --dry-run
 `require_usable_device()`、`format_selection()`、`describe_candidate()`，
 `Calibration` 数据类，以及异常 `CalibrationError`、`CalibrationRequiredError`、
 `CalibrationFileError`、`CalibrationVerificationError`、`UncalibratedDeviceError`。
+
+## 状态
+
+哪些验过、哪些没验过：
+
+| 能力 | 状态 | 证据 |
+| --- | --- | --- |
+| 模型几何与单位 | ✅ 已验证 | `tests/test_mujoco_gripper.py::TestGeometryAndUnits` —— 87.000 mm 开口、网格单位、全行程无自穿透 |
+| 那些反直觉行为的物理保真 | ✅ 已验证 | `TestForceSemantics` 与 `TestActuator` 把「已知行为」逐条固化成测试 |
+| 与 `LiteGrip` 的 API 对等 | ✅ 已验证 | `TestApiParity` 持有一份冻结的成员清单；装了 SDK 时会对着真类比，2026-09-28 那次报出缺 `refresh_status` —— 由 PR #4 补上 |
+| 标定闸 | ✅ 已验证 | `tests/test_calibration.py`，84 个用例，对手是一个能让 `load_calibration()` 复现 SDK 静默回落的替身 |
+| 例程 01–03 | ✅ 已验证 | 各自带 `--no-render` 退出码 0，不需要硬件、不需要 SDK |
+| 例程 04 / 05 的 `--dry-run` | ✅ 已验证 | 两个都退出码 0；05 收尾的开度比对打印 `Δ +0.0000` |
+| 例程命令行契约 | ✅ 已验证 | `--list-calibrations` 退出码 0；非交互且不给 `--calibration` 时退出码 2 并打印指引 |
+| 真机运动 | ⚠️ **未验证** | 手上没有 CAN 硬件。真机那条路径只经由 `DryRunGripper` 跑过，它报的是一份 2026-09-24 标定的 θ 端点；本包从未在这里驱动过 SDK 本身 |
 
 ## 已知行为
 
@@ -327,7 +341,6 @@ SDK 的 `GripperState` 带 `data_age_s`（这批数值来自多久以前的那�
 真机代码如果靠 `is_stale` 判断要不要重读，在仿真上会一直走"新鲜"分支，
 这是对的。
 
-### `litegrip` SDK 里发现的两个 bug
 ### `litegrip` SDK 里发现的三个 bug
 
 在此列出以供知悉。`litegrip-mujoco` 不修补 SDK。第三个它选择**拦在前面不让跑** ——
@@ -346,11 +359,20 @@ SDK 的 `GripperState` 带 `data_age_s`（这批数值来自多久以前的那�
    返回 `True`。所以路径拼错与载入成功在返回值上完全一样。另外，文件能解析但缺
    `rad_to_mm` 时，抛出的 `KeyError` 落在处理其它缺键的那段守卫之外。
 
+## 相关仓库
+
+| 仓库 | 定位 |
+| --- | --- |
+| [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro 描述包 —— 本模型的几何来源 |
+| [litegrip-pybullet](https://github.com/nexform-tech/litegrip-pybullet) | 同一款夹爪的 PyBullet 仿真环境 |
+| [litearm-mujoco](https://github.com/nexform-tech/litearm-mujoco) | LiteArm 的 MuJoCo 环境，本包的形态参照它 |
+| [lite-grip](https://gitee.com/yudao_hz_1/lite-grip) | 本包对标的真机 SDK |
+
 ## 开发
 
 ```bash
-pip install -e ".[dev]"
-python -m pytest tests/ -v
+python3 -m pip install -e ".[dev]"
+python3 -m pytest tests/ -v
 ```
 
 测试套件是纯仿真的 —— 不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。
@@ -359,10 +381,12 @@ python -m pytest tests/ -v
 模型结构、毫米标定口径、标定闸与碰撞几何的设计取舍见
 [docs/DEVELOPER_GUIDE_zh-CN.md](docs/DEVELOPER_GUIDE_zh-CN.md)。
 
+## 仓库规范
+
+本仓库遵循 NEXFORM ROBOTICS 的共享仓库规范：代理操作规则见 [AGENTS.md](AGENTS.md)，
+提交信息用 Conventional Commits，每次合并进 `main` 由 semantic-release 自动发版。
+
 ## 许可证
 
-Proprietary
-
----
-
-[English](README.md) | [开发者指南](docs/DEVELOPER_GUIDE_zh-CN.md)
+专有 —— `pyproject.toml` 里声明的是 `LicenseRef-Proprietary`。但本仓库的 `LICENSE` 文件
+装的是 Apache License 2.0 全文，两者尚未统一，再分发之前请先确认以哪一份为准。

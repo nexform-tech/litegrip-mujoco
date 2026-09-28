@@ -40,7 +40,7 @@ jobs:
       - name: Lint Markdown
         run: |
           npx --yes markdownlint-cli2@0.23.3 \
-            "README.md" "README_zh-CN.md" "docs/*.md"
+            "README.md" "README.zh-CN.md" "docs/*.md"
 
       - name: Validate repository standards
         run: |

@@ -1,29 +1,29 @@
 # litegrip-mujoco
 
-Official MuJoCo-based simulation environment for the **LiteGrip parallel two-finger gripper**.
-API-compatible with the `litegrip` SDK — swap `LiteGrip` for `MujocoGripper` and your control
-code runs identically in simulation and on hardware.
+Official MuJoCo-based simulation environment for the **LiteGrip parallel two-finger gripper**,
+API-compatible with the `litegrip` SDK — swap `LiteGrip` for `MujocoGripper` and the same
+control code runs in simulation and on hardware.
 
-## Features
+**English** · [简体中文](README.zh-CN.md)
 
-- 🔄 **Drop-in API compatibility** — all 44 public `LiteGrip` members, same names, same meanings.
-- 🖥️ **Three operating modes** — Standalone simulation / Mirror tracking / Dual control.
-- 🎮 **Native MuJoCo rendering** — real-time visualization of jaw motion, contact and grasp.
-- 🧪 **No hardware required** — `--dry-run` runs the mirror and dual-control examples without CAN.
-- 📏 **True millimetres** — the stroke basis is 85.452 mm of measured URDF geometry, not the
-  SDK's nominal 120 mm scale.
-- **Calibration is explicit** — anything that moves the real gripper must be given a
-  calibration file first. The SDK's silent fallback to its factory constants is refused, not
-  inherited. See [Calibration](#calibration).
+| Property | Value |
+| --- | --- |
+| Product | LiteGrip parallel two-finger gripper |
+| Repository role | MuJoCo simulation environment |
+| Model | Two parallel prismatic fingers, 42.726 mm travel each |
+| Jaw opening | 1.548 mm closed … 87.000 mm open |
+| Stroke basis | 85.452 mm, measured from the URDF — not the SDK's nominal 120 mm |
+| Physics | MuJoCo 3.0+, `dt = 1 ms`, θ-space PD at the SDK's own gains |
+| Python | 3.10+ |
 
-## Installation
+## Install
 
 ```bash
 # Standalone simulation (no hardware needed)
-pip install litegrip-mujoco
+python3 -m pip install litegrip-mujoco
 
-# Mirror / Dual control mode (needs the real gripper SDK)
-pip install "litegrip-mujoco[mirror]"
+# Mirror and dual control (needs the real gripper SDK)
+python3 -m pip install "litegrip-mujoco[mirror]"
 ```
 
 Or from source:
@@ -31,12 +31,10 @@ Or from source:
 ```bash
 git clone https://github.com/nexform-tech/litegrip-mujoco.git
 cd litegrip-mujoco
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 ```
 
-## Quick Start
-
-### Mode 1 — Standalone Simulation
+## Quick start
 
 ```python
 from litegrip_mujoco import MujocoGripper
@@ -66,7 +64,7 @@ with MujocoGripper(model_path="scene.xml", render=True) as gripper:
     gripper.release_fixture()   # the part now hangs on friction alone
 ```
 
-### Mode 2 — Mirror Mode (sim follows the real gripper)
+### Mirror mode (the simulation follows the real gripper)
 
 ```python
 from litegrip_mujoco import MujocoGripper, MirrorMode, apply_calibration, require_sdk
@@ -88,7 +86,7 @@ with MujocoGripper(render=True) as sim:
 `apply_calibration()` must run after `connect()` and before `enable()`. `enable()` is the first
 call that energises the motor, so a calibration that failed to load has to be caught above it.
 
-### Mode 3 — Dual Control (one command, both grippers)
+### Dual control (one command, both grippers)
 
 ```python
 from litegrip_mujoco import DualGripper
@@ -240,13 +238,13 @@ semantics — including the ones that surprise people. See **Known behaviour** b
 
 ## Examples
 
-| Example | Description | Needs hardware |
-| --- | --- | :---: |
-| `01_hello_sim.py` | Create the simulation, read state, open and close once | ❌ |
-| `02_move_sim.py` | Position, speed and force control; grasp verification | ❌ |
-| `03_trajectory.py` | Record, save, load and replay a position trajectory | ❌ |
-| `04_mirror_real.py` | The real gripper drives the simulation | `--dry-run`, else `--calibration` |
-| `05_dual_control.py` | One command drives both simulation and hardware | `--dry-run`, else `--calibration` |
+| Example | Direction | Hardware needed? |
+| --- | --- | --- |
+| [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | — (pure MuJoCo) | No |
+| [`examples/02_move_sim.py`](examples/02_move_sim.py) | position, speed and force control | No |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | record, save, load, replay | No |
+| [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | gripper → simulation | `--dry-run`, else `--calibration` |
+| [`examples/05_dual_control.py`](examples/05_dual_control.py) | one command → both | `--dry-run`, else `--calibration` |
 
 Examples 04 and 05 use the real gripper unless `--dry-run` is given, so they require a
 calibration file — see [Calibration](#calibration).
@@ -266,9 +264,9 @@ If a run that opened the viewer ends with `Segmentation fault (core dumped)` **a
 `✅ 完成`, the run itself succeeded — that is an upstream GL teardown crash at process exit, not a
 simulation failure. `--no-render` is unaffected and exits cleanly. See the developer guide.
 
-## API Reference
+## API reference
 
-Every public member of `litegrip.LiteGrip` exists on `MujocoGripper` with the same name and
+All 44 public members of `litegrip.LiteGrip` exist on `MujocoGripper` with the same name and
 the same meaning.
 
 | `litegrip.LiteGrip` | `MujocoGripper` | Notes |
@@ -309,6 +307,21 @@ Calibration exports: `apply_calibration()`, `require_calibration()`,
 `require_usable_device()`, `format_selection()`, `describe_candidate()`, the `Calibration`
 dataclass, and the exceptions `CalibrationError`, `CalibrationRequiredError`,
 `CalibrationFileError`, `CalibrationVerificationError` and `UncalibratedDeviceError`.
+
+## Status
+
+What has been verified, and what has not:
+
+| Capability | Status | Evidence |
+| --- | --- | --- |
+| Model geometry and units | ✅ Verified | `tests/test_mujoco_gripper.py::TestGeometryAndUnits` — the 87.000 mm opening, mesh units, and no self-penetration at any point in the stroke |
+| Physical fidelity of the awkward parts | ✅ Verified | `TestForceSemantics` and `TestActuator` freeze the behaviours under *Known behaviour* as tests |
+| API parity with `LiteGrip` | ✅ Verified | `TestApiParity` holds a frozen member list; with the SDK installed it compares against the real class, which on 2026-09-28 reported `refresh_status` missing — PR #4 adds it |
+| Calibration guard | ✅ Verified | `tests/test_calibration.py`, 84 cases, against a stand-in whose `load_calibration()` reproduces the SDK's silent fallback |
+| Examples 01–03 | ✅ Verified | Each exits 0 with `--no-render`, with no hardware and no SDK |
+| Examples 04 and 05, `--dry-run` | ✅ Verified | Both exit 0; 05's closing comparison prints `Δ +0.0000` |
+| Example command-line contract | ✅ Verified | `--list-calibrations` exits 0; a non-interactive run with no `--calibration` exits 2 and prints the guidance |
+| Real-hardware motion | ⚠️ **Not verified** | No CAN hardware has been available. The real path is exercised only through `DryRunGripper`, which reports a 2026-09-24 calibration's θ endpoints; the SDK itself has never been driven from this package here |
 
 ## Known behaviour
 
@@ -351,7 +364,6 @@ deliberate — it reflects the absence of a CAN link, not a change to the SDK's 
 Real-machine code that uses `is_stale` to decide whether to re-read will simply always take
 the "fresh" branch under simulation, which is correct.
 
-### Two bugs found in the `litegrip` SDK
 ### Three bugs found in the `litegrip` SDK
 
 Reported here for awareness. `litegrip-mujoco` does not patch the SDK. The third one it refuses
@@ -373,11 +385,20 @@ gripper in the wrong coordinates rather than an exception.
    Separately, when a file parses but has no `rad_to_mm`, the `KeyError` raises from outside the
    guard that handles the other missing keys.
 
+## Related repositories
+
+| Repository | Role |
+| --- | --- |
+| [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro description package — the geometry this model is built from |
+| [litegrip-pybullet](https://github.com/nexform-tech/litegrip-pybullet) | PyBullet simulation environment for the same gripper |
+| [litearm-mujoco](https://github.com/nexform-tech/litearm-mujoco) | MuJoCo environment for the LiteArm, which this package's shape follows |
+| [lite-grip](https://gitee.com/yudao_hz_1/lite-grip) | The hardware SDK this package mirrors |
+
 ## Development
 
 ```bash
-pip install -e ".[dev]"
-python -m pytest tests/ -v
+python3 -m pip install -e ".[dev]"
+python3 -m pytest tests/ -v
 ```
 
 The suite is pure simulation — no CAN interface, no hardware, no `litegrip` SDK. Cases that
@@ -386,10 +407,14 @@ need the SDK skip themselves when it is absent.
 See [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for the model layout, the millimetre
 basis, the calibration guard, and the design decisions behind the collision geometry.
 
+## Repository standards
+
+This repository follows the shared NEXFORM ROBOTICS repository standards: the agent operating
+rules in [AGENTS.md](AGENTS.md), Conventional Commits, and automated semantic-release versioning
+on every merge to `main`.
+
 ## License
 
-Proprietary
-
----
-
-[中文文档](README_zh-CN.md) | [Developer Guide](docs/DEVELOPER_GUIDE.md)
+Proprietary — declared as `LicenseRef-Proprietary` in `pyproject.toml`. The `LICENSE` file in
+this repository contains the Apache License 2.0 text; the two have not been reconciled, so
+settle which applies before redistributing.
