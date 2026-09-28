@@ -11,6 +11,8 @@ API 与 `litegrip` SDK 完全兼容 —— 把 `LiteGrip` 换成 `MujocoGripper`
 - 🎮 **原生 MuJoCo 渲染** —— 实时显示指爪运动、接触与抓取。
 - 🧪 **不需要硬件** —— 镜像与双控例程带 `--dry-run`，无 CAN 也能跑通全流程。
 - 📏 **真实毫米** —— 行程基准是 URDF 实测几何的 85.452 mm，不是 SDK 名义的 120 mm 刻度。
+- **标定显式选择** —— 任何会让真机动起来的代码，都必须先给一份标定文件。
+  SDK 那种静默回落到出厂常量的行为会被拦下，不会继承。见[标定](#标定)。
 
 ## 安装
 
@@ -64,11 +66,15 @@ with MujocoGripper(model_path="scene.xml", render=True) as gripper:
 ### 模式 2 —— 镜像（仿真跟随真机）
 
 ```python
-from litegrip_mujoco import MujocoGripper, MirrorMode, require_sdk
+from litegrip_mujoco import MujocoGripper, MirrorMode, apply_calibration, require_sdk
+
+# 上位机标定工具为这台夹爪写出的文件
+CALIBRATION = "~/.litegrip/litegrip_calibration.json"
 
 sdk = require_sdk()
 real = sdk.LiteGrip(channel="can0", can_id=0x08)
 real.connect()
+apply_calibration(real, CALIBRATION)   # 必须在 enable() 之前
 real.enable()
 
 with MujocoGripper(render=True) as sim:
@@ -76,12 +82,16 @@ with MujocoGripper(render=True) as sim:
         real.goto(20.0)     # 仿真实时跟随
 ```
 
+`apply_calibration()` 必须排在 `connect()` 之后、`enable()` 之前。`enable()` 是第一个
+会给电机上电的调用，标定没载上就必须在它上面被拦下。
+
 ### 模式 3 —— 双控（一条指令，两边同时动）
 
 ```python
 from litegrip_mujoco import DualGripper
 
-dual = DualGripper(channel="can0", can_id=0x08, render=True)
+dual = DualGripper(channel="can0", can_id=0x08, render=True,
+                   calibration="~/.litegrip/litegrip_calibration.json")
 dual.start()
 
 dual.open()
@@ -90,6 +100,103 @@ print(dual.compare())       # {'real_frac': …, 'sim_frac': …, 'delta': …}
 
 dual.disconnect()           # 注意：close() 是合拢夹爪，不是释放资源
 ```
+
+## 标定
+
+标定文件记录**一台**真机的两个 θ 端点 —— `zero_position_rad`（闭合端）、
+`max_position_rad`（张开端）和 `rad_to_mm`。它由上位机（GUI）的标定工具写出，
+本包自己产不出标定文件。
+
+**任何会让真机动起来的代码，都必须在运行时选定一份标定文件。** 没有谁会替你选，
+默认的那份也绝不会被隐式使用。原因见[为什么要有这道闸](#为什么要有这道闸)；
+一句话版本是：SDK 的 `load_calibration()` 无法告诉你它到底读了哪个文件。
+
+### 怎么选
+
+`04_mirror_real.py` 与 `05_dual_control.py` 接受两种形式：
+
+| 调用方式 | 行为 |
+| --- | --- |
+| `--calibration PATH` | 直接用这份文件，不弹提示。脚本和非交互运行走这条。 |
+| 不带参数、交互式终端 | 列出候选及其端点、行程，然后让你挑。 |
+| 不带参数、非交互终端 | 以状态码 2 退出，并打印该用的 `--calibration` 写法。 |
+
+```bash
+# 先看看这台机器上有哪些，再挑一份 —— 在仓库根目录执行
+python3 examples/05_dual_control.py --list-calibrations
+python3 examples/05_dual_control.py --calibration ~/.litegrip/litegrip_calibration.json
+```
+
+`--dry-run` 不动真机，完全跳过标定选择。
+
+从 Python 调时，`calibration=` 是关键字参数，`apply_calibration()` 是显式调用：
+
+```python
+from litegrip_mujoco import DualGripper, MirrorMode, apply_calibration
+
+CALIBRATION = "~/.litegrip/litegrip_calibration.json"
+
+dual = DualGripper(channel="can0", can_id=0x08, calibration=CALIBRATION)
+MirrorMode(real, sim, rate_hz=50.0, calibration=CALIBRATION)
+
+real.connect()
+apply_calibration(real, CALIBRATION)   # connect() 之后、enable() 之前
+real.enable()
+```
+
+顺序是有意义的。`enable()` 是第一个给电机上电的调用，标定必须在它上面套好并校验完。
+`apply_calibration()` 只抛异常、不给警告：读不出的文件、自相矛盾的文件、SDK 的出厂文件、
+以及载入后 `config` 端点与文件对不上的情况，一律直接报错。
+
+### 候选从哪来
+
+不给显式路径时，扫描目录是「SDK 默认标定路径所在目录」（`$LITEGRIP_CALIB`，否则
+`~/.litegrip/litegrip_calibration.json`）和当前工作目录，取其中的 `*.json` 普通文件。
+SDK 自带的出厂文件永远不出现在候选里。可用的标定排在不可用的 JSON 前面，按修改时间倒序。
+
+显式给的路径永远优先，也永远不会被质疑 —— 包括 SDK 的默认路径。那份文件在列表里会标上
+`⚠ SDK 默认路径`，让选择可见，但**刻意选它是允许的**。被拒绝的只是「不选就用」。
+
+### 这道闸检查什么
+
+三层，因为任何单独一层都能被绕过：
+
+1. 在 SDK 拿到文件**之前**先解析并校验 —— 必填键齐全、取值是有限数、`rad_to_mm > 0`，
+   且闭合端在数值上**大于**张开端。不过关的文件根本不会交给 SDK。
+2. 按 `realpath` 认身份，拒绝 SDK 的出厂标定，所以改名或软链接都蒙混不过去。
+3. 载入之后，把 `config.pos_closed_rad` / `pos_open_rad` 与文件逐字段比对。对不上就报错，
+   并把「请求的端点」和「实际读到的端点」一起打出来 —— 那正是静默回落到出厂值的特征。
+
+来源这一道闸，外加「`config` 是否仍与已套用的标定一致」这一项，在每次
+`read_frac_open()` / `write_frac_open()` 和每次 `DualGripper`、`MirrorMode` 运动之前都会
+再跑一遍。所以**跑着跑着丢掉标定**的设备同样会被抓住，不只是从没标定过的。
+
+### 这道闸检查不了什么
+
+一份格式完全正确、但属于**同型号另一台夹爪**的标定文件，与正确的那份无法区分。
+这里没有任何办法识别它。唯一可做的检查是算术：选择器会打印每份文件隐含的行程，
+动手之前先把那个数看一眼，与这台夹爪的真实行程对一下。
+
+### 换算函数默认严格
+
+`read_frac_open()` 与 `write_frac_open()` 默认 `strict=True`。在没有可信标定的设备上，
+它们抛 `UncalibratedDeviceError`，而不是退回到 SDK 的毫米路径 —— 那条路径正是用缺失的
+端点定义的。
+
+旧行为仍然可达：`read_frac_open(device, warn=True)` 会发一条 `DeprecationWarning`，
+隐含 `strict=False`，保留原来的「警告并回落」路径。想要同样的行为又不想要警告，传
+`strict=False`。
+
+仿真设备豁免，因为它们的端点来自模型而不是标定 —— `MujocoGripper` 与 `DryRunGripper`
+都设了 `IS_SIMULATED = True`。其它设备可以用
+`mark_calibrated(device, None, reason="…")` 显式登记豁免理由。
+
+### 为什么要有这道闸
+
+SDK 的 `load_calibration(path)` 会构造 `sources = [path, _FACTORY_CALIB]`，吞掉
+`FileNotFoundError` 与 `json.JSONDecodeError`，一路回落到出厂文件，然后对**两个来源都**
+返回 `True`。于是路径打错一个字母的后果，是一台自称载入成功、随后按**别人的坐标**运动的
+夹爪。这条路径上另外两个缺陷见[已知行为](#已知行为)。
 
 ## 架构
 
@@ -123,8 +230,10 @@ dual.disconnect()           # 注意：close() 是合拢夹爪，不是释放资
 | `01_hello_sim.py` | 建立仿真、读状态、开合一次 | ❌ |
 | `02_move_sim.py` | 位置 / 速度 / 力控，以及抓取验证 | ❌ |
 | `03_trajectory.py` | 位置轨迹录制、存盘、加载与回放 | ❌ |
-| `04_mirror_real.py` | 真机开度实时驱动仿真 | `--dry-run` |
-| `05_dual_control.py` | 同一条指令同时下发仿真与真机 | `--dry-run` |
+| `04_mirror_real.py` | 真机开度实时驱动仿真 | `--dry-run`，否则要 `--calibration` |
+| `05_dual_control.py` | 同一条指令同时下发仿真与真机 | `--dry-run`，否则要 `--calibration` |
+
+04 与 05 不给 `--dry-run` 时走的是真机，因此必须先给一份标定文件 —— 见[标定](#标定)。
 
 ```bash
 # 在仓库根目录跑，且先 `pip install -e ".[dev]"` —— 例程 import 的是
@@ -175,6 +284,14 @@ python3 examples/05_dual_control.py --dry-run
 另导出：`DualGripper`、`MirrorMode`、`DryRunGripper`、`read_frac_open()`、
 `write_frac_open()`、`constants`、`require_sdk()`、`HAS_SDK`。
 
+标定相关导出：`apply_calibration()`、`require_calibration()`、`select_calibration_for()`、
+`resolve_calibration_path()`、`discover_calibrations()`、`load_calibration_file()`、
+`default_calibration_path()`、`sdk_factory_calibration_path()`、`mark_calibrated()`、
+`applied_calibration()`、`is_calibrated()`、`is_simulated_device()`、
+`require_usable_device()`、`format_selection()`、`describe_candidate()`，
+`Calibration` 数据类，以及异常 `CalibrationError`、`CalibrationRequiredError`、
+`CalibrationFileError`、`CalibrationVerificationError`、`UncalibratedDeviceError`。
+
 ## 已知行为
 
 下面这些是**对 SDK 的忠实复刻**，不是仿真缺陷。不要在没有同步改动真机行为的前提
@@ -211,8 +328,10 @@ SDK 的 `GripperState` 带 `data_age_s`（这批数值来自多久以前的那�
 这是对的。
 
 ### `litegrip` SDK 里发现的两个 bug
+### `litegrip` SDK 里发现的三个 bug
 
-在此列出以供知悉。`litegrip-mujoco` 既不修补也不规避它们。
+在此列出以供知悉。`litegrip-mujoco` 不修补 SDK。第三个它选择**拦在前面不让跑** ——
+见[标定](#标定) —— 因为那一个的后果不是抛异常，而是一台**在错误坐标里运动**的夹爪。
 
 1. **`goto_rad()` 忽略入参。** `constants.py` 里 `POS_OPEN_RAD = +1.14`、
    `POS_CLOSED_RAD = 0.0`，违反了 SDK 自己文档写的不变量（闭合值应数值更大）。
@@ -222,6 +341,10 @@ SDK 的 `GripperState` 带 `data_age_s`（这批数值来自多久以前的那�
 2. **`calibrate_guided()` 写死 120 刻度。** 它算的是 `rad_to_mm = 120.0 / travel`，
    忽略 `config.max_stroke_mm`，而 `calibrate()` 与 `calibrate_manual()` 都正确使用它。
    因此走引导式标定必然产出 120 刻度的夹爪。
+3. **`load_calibration()` 无法告知它读了哪个文件。** 它先试传入的路径，再试自带的出厂
+   标定，途中吞掉 `FileNotFoundError` 与 `json.JSONDecodeError`，最后对**两个来源都**
+   返回 `True`。所以路径拼错与载入成功在返回值上完全一样。另外，文件能解析但缺
+   `rad_to_mm` 时，抛出的 `KeyError` 落在处理其它缺键的那段守卫之外。
 
 ## 开发
 
@@ -233,7 +356,7 @@ python -m pytest tests/ -v
 测试套件是纯仿真的 —— 不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。
 需要 SDK 的用例在 SDK 缺席时会自行 skip。
 
-模型结构、毫米标定口径与碰撞几何的设计取舍见
+模型结构、毫米标定口径、标定闸与碰撞几何的设计取舍见
 [docs/DEVELOPER_GUIDE_zh-CN.md](docs/DEVELOPER_GUIDE_zh-CN.md)。
 
 ## 许可证

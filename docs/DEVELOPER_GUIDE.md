@@ -10,6 +10,7 @@ src/litegrip_mujoco/
 ├── __init__.py          Public exports
 ├── constants.py         Units, stroke basis, conversions. No SDK import, by design.
 ├── controller.py        θ-space PD + minimum-jerk / linear ramps
+├── calibration.py       Calibration provenance: discovery, validation, apply-and-verify
 ├── gripper.py           MujocoGripper — the LiteGrip-compatible façade
 ├── mirror.py            DualGripper, MirrorMode, cross-device frac_open helpers
 ├── dryrun.py            DryRunGripper — a LiteGrip-shaped virtual gripper
@@ -58,6 +59,12 @@ calibration.
 | Simulation | `0.0` | `-1.14` | 1.14 |
 | Real gripper (calibrated) | `1.775959` | `-0.064279` | 1.8402 |
 
+The real row is one calibration taken on 2026-09-24, frozen as a reference. Recalibrating the
+gripper changes both numbers, so treat them as an illustration rather than as this machine's
+current endpoints. `constants.REAL_POS_CLOSED_RAD` / `REAL_POS_OPEN_RAD` carry that pair and are
+what the dry-run gripper reports, so its θ arithmetic has the same shape as a real device's —
+nothing else reads them.
+
 Handing the same `position_rad` to both devices puts them in completely different positions.
 `frac_open ∈ [0, 1]` is calibration-independent and is therefore the only safe quantity to
 exchange. `MirrorMode` and `DualGripper` exchange `frac_open`; see `mirror.py`.
@@ -76,6 +83,77 @@ Both are known, both are deliberate, both are pinned by tests:
 
 The relationship is `gap_mm = travel_mm + 1.548`. `get_position()` reports travel (0 = closed);
 `gap_mm()` reports the absolute opening.
+
+## Calibration selection and provenance
+
+Real-hardware motion requires a calibration file chosen at run time. `calibration.py` owns that
+rule; `mirror.py` and examples 04/05 enforce it by calling into it.
+
+### The two gates
+
+A device may move only when both hold:
+
+| Gate | Test | Failure |
+| --- | --- | --- |
+| Provenance | `is_simulated_device(d)` or `_provenance(d) is not None` | `UncalibratedDeviceError` |
+| Validity | `_endpoints(d) is not None` — the closed endpoint is numerically larger than the open one | `UncalibratedDeviceError` |
+
+Gate 1 asks where the numbers came from, gate 2 whether they make sense. The SDK's factory
+constants (`pos_closed_rad = 0.0`, `pos_open_rad = +1.14`) have the right *types* but the wrong
+*order*, and that inversion is exactly how an uncalibrated device is recognised: `_endpoints()`
+returns `None` unless `pos_closed_rad > pos_open_rad`. Every real calibration satisfies it.
+
+Provenance is a frozen `Provenance(path, calibration, reason)` stored as
+`device._litegrip_mujoco_calibration`, with a `WeakKeyDictionary` behind it for devices that
+refuse `setattr` (`__slots__`). `mark_calibrated(device, None, reason="…")` is the escape hatch
+for a device whose endpoints are trustworthy but which has no file; the reason is recorded so
+the exemption shows up in review instead of being implied.
+
+`require_usable_device()` runs gate 1 and then `_check_device_still_holds()`, which raises
+`CalibrationVerificationError` if `config` has drifted away from the calibration that was
+applied. That second check is what catches a device that *lost* its calibration mid-run, not
+just one that never had it.
+
+### The three layers
+
+`apply_calibration(device, path)` defends in three places, because each one alone is
+insufficient:
+
+1. **Validate before the SDK sees the file.** Existence, regular file, JSON object, the three
+   required keys (`zero_position_rad`, `max_position_rad`, `rad_to_mm`), finiteness,
+   `rad_to_mm > 0`, `closed > open`, and a span of at least `MIN_SPAN_RAD = 1e-3`. The SDK
+   raises an unguarded `KeyError` when a file parses but lacks `rad_to_mm`, and a file with
+   `closed == open` divides by zero further downstream.
+2. **Refuse the factory file by `realpath` identity.** Comparing paths as strings fails against
+   a symlink or a relative path; comparing resolved paths does not.
+3. **Compare the post-load `config` endpoints to the file's, field by field.** This is the
+   load-bearing layer — it is the only one that catches the SDK's fallback — and it raises with
+   both the requested and the observed endpoint, which is the signature of that fallback.
+
+⚠ **Never move the `apply_calibration()` call below `enable()`.** `enable()` is the first call
+that energises the motor. The SDK's documented order is `connect() → load_calibration() →
+enable()`; `apply_calibration()` is a drop-in for the middle step, and both examples follow that
+order.
+
+### Why `read_frac_open` is strict by default
+
+The millimetre fallback is defined in terms of the endpoints that are missing, so it returns a
+number that looks like a reading and is not one. On a device that fails either gate,
+`read_frac_open()` and `write_frac_open()` raise `UncalibratedDeviceError` instead.
+
+`read_frac_open(device, warn=True)` survives as a deprecated alias: it emits a
+`DeprecationWarning` and implies `strict=False`. It was kept rather than deleted because
+deleting it breaks callers, and under this repository's release policy a breaking change means a
+major version — not something to do as a side effect of a safety fix. `strict=False` gives the
+old path without the warning.
+
+### The `DryRunGripper` trap
+
+`DryRunGripper.load_calibration()` and `save_calibration()` delegate to `self._inner`, so
+`dry.config` never changes and the delegate's return value says nothing about the outer object.
+`DryRunGripper` is exempt from gate 1 via `IS_SIMULATED`, so nothing here depends on those
+delegates — but do not read `dry.config` expecting the loaded file's endpoints. Pre-existing and
+unrelated to this guard; tracked rather than fixed here.
 
 ## Why collision uses boxes, not meshes
 
@@ -339,6 +417,11 @@ Three layers:
   `test_exception_family_is_the_sdk_family` checks the seven exception names resolve to the SDK's
   *objects*. This layer is what catches upstream drift: when the SDK gains a field, a code or a
   method, these fail loudly instead of the simulation quietly missing it.
+- **Calibration guard** — `tests/test_calibration.py` covers discovery, validation, the picker,
+  the provenance marker and both strict conversions, against a duck-typed `LiteGrip` stand-in
+  whose `load_calibration()` can be told to reproduce the SDK's silent fallback. Examples 04 and
+  05 are also run as subprocesses to pin the command-line contract: `--list-calibrations` exits
+  0, and a non-interactive run without `--calibration` exits 2 with the guidance text.
 
 The suite needs no CAN interface, no hardware and no `litegrip` SDK. Cases that want the SDK skip
 themselves when it is absent.

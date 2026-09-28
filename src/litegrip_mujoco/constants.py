@@ -29,7 +29,8 @@ SDK 的 `UnitConversion.RAD_TO_MM = 120/1.14 ≈ 105.26`，`GripperConfig.max_st
     仿真   θ_closed =  0.000000   θ_open = -1.140000   量程 1.1400 rad
     真机   θ_closed =  1.775959   θ_open = -0.064279   量程 1.8402 rad
 
-（真机数据取自 `~/.litegrip/litegrip_calibration.json`。）
+（真机那一行是**某一次标定的快照**，不是当前文件的内容 —— 具体见文件末尾
+REAL_POS_* 的注释。每次重新标定这些数都会变。）
 
 所以**θ 不能在仿真与真机之间直接互换**。跨设备唯一可移植的量是无量纲的
 `frac_open ∈ [0, 1]`。镜像/双控一律走它，见 `mirror.py`。
@@ -274,8 +275,13 @@ def natural_frequency(kp: float = DEFAULT_KP, mass: float = 0.85) -> float:
     return math.sqrt(GAIN_TO_JOINT * kp / mass)
 
 
-#: 真机标定的两个 θ 端点（`~/.litegrip/litegrip_calibration.json`），仅作参考与
-#: 文档用。仿真**不使用**它们——写在这里是为了让读者看到"θ 端点设备相关"这件事
-#: 有具体数字支撑，也是 examples/04 与 05 里 `--dry-run` 虚拟夹爪的默认端点。
+#: 真机标定的两个 θ 端点，取自 **2026-09-24 那次标定**的
+#: `~/.litegrip/litegrip_calibration.json`。这是一份**历史快照**：真机后来重新标定过，
+#: 现在那个文件里的端点是别的值。不要拿它当"当前真机的端点"用——真机的端点只能从
+#: 本次选定的标定文件里读。
+#:
+#: 写死在这里有两个理由：一是让"θ 端点设备相关"这句话有具体数字支撑；二是
+#: `dryrun.DryRunGripper` 拿它当默认端点，好让 `--dry-run` 的换算路径与接真机时
+#: 完全一致（那台虚拟夹爪对外声称的就是这一组真机口径的端点）。
 REAL_POS_CLOSED_RAD: Final = 1.775959
 REAL_POS_OPEN_RAD: Final = -0.064279

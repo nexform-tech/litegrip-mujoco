@@ -12,6 +12,9 @@ code runs identically in simulation and on hardware.
 - 🧪 **No hardware required** — `--dry-run` runs the mirror and dual-control examples without CAN.
 - 📏 **True millimetres** — the stroke basis is 85.452 mm of measured URDF geometry, not the
   SDK's nominal 120 mm scale.
+- **Calibration is explicit** — anything that moves the real gripper must be given a
+  calibration file first. The SDK's silent fallback to its factory constants is refused, not
+  inherited. See [Calibration](#calibration).
 
 ## Installation
 
@@ -66,11 +69,15 @@ with MujocoGripper(model_path="scene.xml", render=True) as gripper:
 ### Mode 2 — Mirror Mode (sim follows the real gripper)
 
 ```python
-from litegrip_mujoco import MujocoGripper, MirrorMode, require_sdk
+from litegrip_mujoco import MujocoGripper, MirrorMode, apply_calibration, require_sdk
+
+# The file the host-side calibration tool wrote for this gripper.
+CALIBRATION = "~/.litegrip/litegrip_calibration.json"
 
 sdk = require_sdk()
 real = sdk.LiteGrip(channel="can0", can_id=0x08)
 real.connect()
+apply_calibration(real, CALIBRATION)   # must come before enable()
 real.enable()
 
 with MujocoGripper(render=True) as sim:
@@ -78,12 +85,16 @@ with MujocoGripper(render=True) as sim:
         real.goto(20.0)     # the simulation follows in real time
 ```
 
+`apply_calibration()` must run after `connect()` and before `enable()`. `enable()` is the first
+call that energises the motor, so a calibration that failed to load has to be caught above it.
+
 ### Mode 3 — Dual Control (one command, both grippers)
 
 ```python
 from litegrip_mujoco import DualGripper
 
-dual = DualGripper(channel="can0", can_id=0x08, render=True)
+dual = DualGripper(channel="can0", can_id=0x08, render=True,
+                   calibration="~/.litegrip/litegrip_calibration.json")
 dual.start()
 
 dual.open()
@@ -92,6 +103,114 @@ print(dual.compare())       # {'real_frac': …, 'sim_frac': …, 'delta': …}
 
 dual.disconnect()           # note: close() closes the jaws, not the resources
 ```
+
+## Calibration
+
+A calibration file records the two θ endpoints of one physical gripper — `zero_position_rad`
+(the closed end), `max_position_rad` (the open end) and `rad_to_mm`. The host-side calibration
+tool (GUI) writes it; nothing in this package can produce one.
+
+**Every code path that moves the real gripper requires a calibration file, chosen at run
+time.** Nothing selects one for you, and the default file is never used implicitly. The reasons
+are in [Why the guard exists](#why-the-guard-exists); the short version is that the SDK's
+`load_calibration()` cannot tell you which file it actually read.
+
+### Choosing a file
+
+`04_mirror_real.py` and `05_dual_control.py` accept two forms:
+
+| Invocation | Behaviour |
+| --- | --- |
+| `--calibration PATH` | Uses that file, no prompt. This is the form for scripts and for non-interactive runs. |
+| no argument, interactive terminal | Prints the candidates with their endpoints and travel, then prompts for one. |
+| no argument, non-interactive terminal | Exits with status 2 and prints the `--calibration` form to use instead. |
+
+```bash
+# List what is on this machine, then pick one — run from the repository root.
+python3 examples/05_dual_control.py --list-calibrations
+python3 examples/05_dual_control.py --calibration ~/.litegrip/litegrip_calibration.json
+```
+
+`--dry-run` moves no hardware and skips calibration selection entirely.
+
+From Python, `calibration=` is a keyword argument, and `apply_calibration()` is the explicit
+call:
+
+```python
+from litegrip_mujoco import DualGripper, MirrorMode, apply_calibration
+
+CALIBRATION = "~/.litegrip/litegrip_calibration.json"
+
+dual = DualGripper(channel="can0", can_id=0x08, calibration=CALIBRATION)
+MirrorMode(real, sim, rate_hz=50.0, calibration=CALIBRATION)
+
+real.connect()
+apply_calibration(real, CALIBRATION)   # after connect(), before enable()
+real.enable()
+```
+
+The order matters. `enable()` is the first call that energises the motor, so the calibration
+must be applied and verified above it. `apply_calibration()` raises rather than warning: on an
+unreadable or inconsistent file, on the SDK's factory file, and on a post-load `config` whose
+endpoints differ from the file's.
+
+### Candidate discovery
+
+With no explicit path, the scan looks in the directory holding the SDK's default calibration
+path (`$LITEGRIP_CALIB`, else `~/.litegrip/litegrip_calibration.json`) and in the working
+directory, for `*.json` regular files. The SDK's bundled factory file is never offered. Valid
+calibrations are listed before unusable JSON, newest first.
+
+An explicit path always wins and is never second-guessed — including the SDK's default path.
+That file is marked `⚠ SDK default path` in the list to make the choice visible, but choosing
+it deliberately is allowed. It is only the *implicit* use that is refused.
+
+### What the guard checks
+
+Three layers, because any one of them can be defeated on its own:
+
+1. The file is parsed and validated **before** the SDK sees it — required keys present, values
+   numeric and finite, `rad_to_mm > 0`, and the closed endpoint numerically **larger** than the
+   open one. A file that fails is never handed to the SDK.
+2. The SDK's factory calibration is refused by `realpath` identity, so relocating or symlinking
+   it does not slip through.
+3. After loading, `config.pos_closed_rad` / `pos_open_rad` are compared field-by-field against
+   the file. A mismatch raises and names both the requested and the observed endpoint — that is
+   the signature of the SDK's silent fallback.
+
+The provenance gate, plus a check that `config` still matches the calibration that was applied,
+runs again on every `read_frac_open()` and `write_frac_open()` call and before every
+`DualGripper` and `MirrorMode` motion. A device that loses its calibration mid-run is therefore
+caught, not only one that never had it.
+
+### What the guard cannot check
+
+A well-formed calibration file for a **different gripper of the same model** is
+indistinguishable from the right one. Nothing here can detect it. The one check available is
+arithmetic: the picker prints the travel each file implies, so read that number before trusting
+the run and compare it with the gripper's real stroke.
+
+### Strict conversions
+
+`read_frac_open()` and `write_frac_open()` are strict by default. On a device with no proven
+calibration they raise `UncalibratedDeviceError` instead of falling back to the SDK's
+millimetre path, which is defined in terms of the very endpoints that are missing.
+
+The previous behaviour is still reachable: `read_frac_open(device, warn=True)` emits a
+`DeprecationWarning`, implies `strict=False`, and keeps the old warn-and-fall-back path. Pass
+`strict=False` for the same thing without the warning.
+
+Simulated devices are exempt, because their endpoints come from the model rather than from a
+calibration — `MujocoGripper` and `DryRunGripper` set `IS_SIMULATED = True`. For any other
+device, `mark_calibrated(device, None, reason="…")` records a deliberate exemption.
+
+### Why the guard exists
+
+The SDK's `load_calibration(path)` builds `sources = [path, _FACTORY_CALIB]`, swallows
+`FileNotFoundError` and `json.JSONDecodeError`, falls through to the factory file, and returns
+`True` for either source. A typo in the path therefore produces a gripper that reports success
+and then moves in someone else's coordinates. See [Known behaviour](#known-behaviour) for the
+two further defects that path exposes.
 
 ## Architecture
 
@@ -126,8 +245,11 @@ semantics — including the ones that surprise people. See **Known behaviour** b
 | `01_hello_sim.py` | Create the simulation, read state, open and close once | ❌ |
 | `02_move_sim.py` | Position, speed and force control; grasp verification | ❌ |
 | `03_trajectory.py` | Record, save, load and replay a position trajectory | ❌ |
-| `04_mirror_real.py` | The real gripper drives the simulation | `--dry-run` |
-| `05_dual_control.py` | One command drives both simulation and hardware | `--dry-run` |
+| `04_mirror_real.py` | The real gripper drives the simulation | `--dry-run`, else `--calibration` |
+| `05_dual_control.py` | One command drives both simulation and hardware | `--dry-run`, else `--calibration` |
+
+Examples 04 and 05 use the real gripper unless `--dry-run` is given, so they require a
+calibration file — see [Calibration](#calibration).
 
 ```bash
 # Run from the repository root, after `pip install -e ".[dev]"` — the examples
@@ -180,6 +302,14 @@ Simulation-only additions: `step()`, `settle()`, `reset()`, `release_fixture()`,
 Also exported: `DualGripper`, `MirrorMode`, `DryRunGripper`, `read_frac_open()`,
 `write_frac_open()`, `constants`, `require_sdk()`, `HAS_SDK`.
 
+Calibration exports: `apply_calibration()`, `require_calibration()`,
+`select_calibration_for()`, `resolve_calibration_path()`, `discover_calibrations()`,
+`load_calibration_file()`, `default_calibration_path()`, `sdk_factory_calibration_path()`,
+`mark_calibrated()`, `applied_calibration()`, `is_calibrated()`, `is_simulated_device()`,
+`require_usable_device()`, `format_selection()`, `describe_candidate()`, the `Calibration`
+dataclass, and the exceptions `CalibrationError`, `CalibrationRequiredError`,
+`CalibrationFileError`, `CalibrationVerificationError` and `UncalibratedDeviceError`.
+
 ## Known behaviour
 
 These are **faithful reproductions of the SDK**, not simulation defects. Do not "fix" them
@@ -222,8 +352,11 @@ Real-machine code that uses `is_stale` to decide whether to re-read will simply 
 the "fresh" branch under simulation, which is correct.
 
 ### Two bugs found in the `litegrip` SDK
+### Three bugs found in the `litegrip` SDK
 
-Reported here for awareness. `litegrip-mujoco` neither patches nor guards against them.
+Reported here for awareness. `litegrip-mujoco` does not patch the SDK. The third one it refuses
+to run behind — see [Calibration](#calibration) — because the failure it produces is a moving
+gripper in the wrong coordinates rather than an exception.
 
 1. **`goto_rad()` ignores its argument.** `constants.py` sets `POS_OPEN_RAD = +1.14` and
    `POS_CLOSED_RAD = 0.0`, which violates the SDK's own documented invariant (the closed value
@@ -234,6 +367,11 @@ Reported here for awareness. `litegrip-mujoco` neither patches nor guards agains
 2. **`calibrate_guided()` hard-codes the 120 mm scale.** It computes `rad_to_mm = 120.0 / travel`
    and ignores `config.max_stroke_mm`, while `calibrate()` and `calibrate_manual()` both honour
    it. Guided calibration therefore always produces a 120-scale gripper.
+3. **`load_calibration()` cannot report which file it read.** It tries the given path, then the
+   bundled factory calibration, swallowing `FileNotFoundError` and `json.JSONDecodeError`, and
+   returns `True` for either. A misspelled path is therefore indistinguishable from success.
+   Separately, when a file parses but has no `rad_to_mm`, the `KeyError` raises from outside the
+   guard that handles the other missing keys.
 
 ## Development
 
@@ -246,7 +384,7 @@ The suite is pure simulation — no CAN interface, no hardware, no `litegrip` SD
 need the SDK skip themselves when it is absent.
 
 See [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for the model layout, the millimetre
-calibration basis, and the design decisions behind the collision geometry.
+basis, the calibration guard, and the design decisions behind the collision geometry.
 
 ## License
 
