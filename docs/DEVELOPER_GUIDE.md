@@ -256,13 +256,68 @@ same window, so the overshoot is faithful, not a simulation defect.
 ## The SDK shim
 
 `_litegrip/` probes for the real `litegrip` package **lazily and once**. If it is installed,
-its dataclasses and enums are re-exported; if not, local field-for-field mirrors in
-`_fallback.py` are used so that `MujocoGripper.get_state()` still returns a real `GripperState`.
+its dataclasses, enums, exceptions and helpers are re-exported; if not, local field-for-field
+mirrors in `_fallback.py` are used so that `MujocoGripper.get_state()` still returns a real
+`GripperState`.
 
-The SDK is not vendored, because importing it pulls in SocketCAN. The one intentional divergence
-in `_fallback.py` is the default `GripperConfig`, which uses the simulation's self-consistent
-values (`pos_closed_rad = 0.0`, `pos_open_rad = -1.14`, `max_stroke_mm = 85.452`) rather than the
-SDK's defaults, which violate their own documented invariant.
+The SDK is not vendored, because importing it pulls in SocketCAN.
+
+### How tightly this tracks the SDK
+
+Coupling lives on three levels, and they do **not** all follow the SDK automatically:
+
+1. **Data types — follows automatically.** The shim resolves each name from the SDK at import
+   time, so `GripperState`, `GripperConfig`, `ErrorCode`, `DM_Motor_Type`, `Control_Mode`,
+   `ERROR_DESCRIPTIONS`, `describe_error`, `STALE_AFTER_S` and the seven exception classes are
+   whatever the installed SDK says they are. `isinstance(state, litegrip.GripperState)` holds.
+2. **Control semantics — hand-copied, does not follow.** Controller gains, the stall window,
+   the min-jerk ramp, the `grasp()` target rewrite. Those are read from the SDK source and
+   reproduced by hand; an upstream change there needs a matching change here.
+3. **Constants — deliberately not imported.** `constants.py` owns the simulation's numbers
+   (85.452 mm, the θ endpoints) and must not inherit the SDK's defaults.
+
+Exceptions are level 1 but with a twist worth knowing: the shim rebinds the names to the SDK's
+*class objects*, not to same-named local classes. `except litegrip.LiteGripError:` has to catch
+what the simulation raises, and two classes that merely share a name would not.
+
+### The intentional divergences
+
+`_fallback.py` diverges from the SDK in one group of values, spread over four types and
+recorded in `DELIBERATE_DIVERGENCE` in the test file:
+
+- **`GripperConfig`, `CalibrationData`, `GripperParams`, `UnitConversion`** — the same two facts
+  copied into four places: `max_stroke_mm` is 85.452 (not the nominal 120), `rad_to_mm` follows
+  from it, and `pos_open_rad` is `-1.14` rather than `+1.14`, because the SDK's pair violates
+  its own documented invariant (the closed end must be numerically larger). See *The millimetre
+  basis*. Note `pos_closed_rad` is `0.0` on both sides and so is **not** listed — the test that
+  guards this list requires listed keys to actually differ.
+
+Two naming details that are *not* divergences, listed here because they look like ones:
+
+- **Enum class names** in `_fallback.py` are the SDK's real names — `MotorType` and
+  `ControlMode` — with `DM_Motor_Type` and `Control_Mode` kept as module-level aliases. The SDK
+  does exactly the same; matching it keeps `repr()` identical, and reprs of
+  `GripperParams.MOTOR_TYPE` do end up in logs.
+- **`home()`** targets the closed position, whereas the SDK's own clamp bug drives it *open*.
+  That divergence is in `gripper.py`, not the shim, and is documented under *Known behaviour*.
+
+Everything else is compared field-by-field against the installed SDK by
+`test_mirrors_match_installed_sdk`, including field order (the dataclasses are constructible by
+position) and public members such as `GripperState.is_stale`. `test_deliberate_divergences_still_diverge`
+is the mirror image: it fails if someone "helpfully" aligns one of the four above with the SDK.
+
+### State freshness
+
+The SDK records `data_age_s` on every `GripperState` — how long ago the frame behind the
+numbers arrived — and derives `has_data` and `is_stale` from it (`STALE_AFTER_S`, default
+0.5 s). This matters on hardware: a disabled motor streams nothing, so `get_state()` can return
+a snapshot seconds old or the pre-enable defaults, which is what `refresh_status()` is for.
+
+Simulation has no CAN link, so both `MujocoGripper.get_state()` and `DryRunGripper.get_state()`
+pass `data_age_s=0.0`: the values are computed on the spot. `is_stale` is therefore always
+`False`. `refresh_status()` keeps the SDK's shape — it calls `_check_connected()` first and so
+raises `NotInitializedError` when not connected — and then returns `True` without asking the
+motor for anything, because there is nothing to ask.
 
 ## Testing
 
@@ -278,9 +333,27 @@ Three layers:
 - **Behaviour** — the public API, checked against the SDK's semantics.
 - **Physical fidelity** — the surprising behaviours above are frozen as tests, with the reason in
   the docstring, so nobody "tidies them up" later.
+- **SDK parity** — the `TestApiParity` class. `test_matches_installed_sdk` pins the 44-member
+  public API snapshot, `test_mirrors_match_installed_sdk` diffs every mirrored dataclass, enum and
+  constants class field-by-field against the installed SDK, and
+  `test_exception_family_is_the_sdk_family` checks the seven exception names resolve to the SDK's
+  *objects*. This layer is what catches upstream drift: when the SDK gains a field, a code or a
+  method, these fail loudly instead of the simulation quietly missing it.
 
 The suite needs no CAN interface, no hardware and no `litegrip` SDK. Cases that want the SDK skip
 themselves when it is absent.
+
+Run it **both ways** before pushing — with the SDK installed and without. The two runs exercise
+different code paths (`shim → SDK` versus `shim → _fallback`) and only the SDK-present run can see
+drift:
+
+```bash
+# with the SDK
+python -m pytest tests/ -q
+
+# without it — point PYTHONPATH at src and use an interpreter that lacks litegrip
+PYTHONPATH=src python3 -m pytest tests/ -q
+```
 
 If you change contact parameters, `test_grasp_force_exceeds_request` will fail and point you at
 the override table in `litegrip.xml`. Update both together.

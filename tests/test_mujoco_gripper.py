@@ -13,6 +13,9 @@
 """
 from __future__ import annotations
 
+import dataclasses
+import enum
+import inspect
 import sys
 import threading
 import time
@@ -681,6 +684,55 @@ class TestState:
     def test_is_grasped_false_when_idle(self, sim):
         assert sim.is_grasped() is False
 
+    def test_state_is_never_stale(self, sim):
+        """仿真态永远是最新的：``is_stale`` 必须为 False。
+
+        SDK 把 ``GripperState.data_age_s`` 的默认值设成 ``inf``，因为真机上
+        "没有数据"是真的会发生 —— 失能的电机不主动发状态帧，``get_state()``
+        返回的是缓存或构造默认值。**仿真不能照抄这个默认值**：状态是从
+        ``mjData`` 直接算出来的，定义上瞬时且精确。照抄的话 ``is_stale``
+        恒为 True，`if state.is_stale: 丢弃读数` 会把每一次好读数都丢掉。
+
+        回归测试：``get_state()`` 构造 ``GripperState`` 时必须显式传
+        ``data_age_s=0.0``。SDK 加这个字段时这里就漏过一次。
+        """
+        st = sim.get_state()
+        assert st.data_age_s == 0.0
+        assert st.is_stale is False
+        assert st.has_data is True
+
+    def test_state_stays_fresh_while_disabled(self, sim):
+        """失能状态下读数同样不陈旧 —— 真机恰恰是反过来的。"""
+        sim.disable()
+        st = sim.get_state()
+        assert st.is_stale is False
+        assert st.data_age_s == 0.0
+
+    def test_refresh_status_is_always_satisfied(self, sim):
+        """``refresh_status()`` 在仿真里恒 True，且失能时也成立。
+
+        真机上这个方法是为了**失能时也能读到位置**（发 0xCC 主动要一帧）。
+        仿真没有 CAN 链路，状态随时可读，所以直接返回 True；但方法必须存在，
+        否则真机代码换到仿真会变成 ``AttributeError``。
+        """
+        assert sim.refresh_status() is True
+        assert sim.refresh_status(timeout_s=0.01) is True
+        sim.disable()
+        assert sim.refresh_status() is True
+
+    def test_dry_run_gripper_also_has_refresh_status(self):
+        """虚拟夹爪同样是 LiteGrip 形态的，不能缺这个方法。"""
+        from litegrip_mujoco import DryRunGripper
+
+        dry = DryRunGripper(realtime=False, noise=False)
+        dry.connect()
+        dry.enable()
+        try:
+            assert dry.get_state().is_stale is False
+            assert dry.refresh_status() is True
+        finally:
+            dry.disconnect()
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 运动
@@ -919,8 +971,9 @@ class TestForceSemantics:
 # API 对等
 # ══════════════════════════════════════════════════════════════════════════
 
-#: `litegrip.LiteGrip` 的全部公开成员（用 ast 从 SDK 源码抽取的快照）。
-#: SDK 未安装时用它兜底，装了就直接对着真类比。
+#: `litegrip.LiteGrip` 的全部公开成员（44 个；用 ast 从 SDK 源码抽取的快照）。
+#: SDK 未安装时用它兜底，装了就直接对着真类比 —— 下面 test_matches_installed_sdk
+#: 会双向核对这份快照，两边任何一个多出成员都会让它失败。
 LITEGRIP_PUBLIC_API: List[str] = [
     "calibrate", "calibrate_guided", "calibrate_manual", "can_id", "channel",
     "clear_fault", "close", "config", "connect", "disable", "disconnect",
@@ -929,8 +982,8 @@ LITEGRIP_PUBLIC_API: List[str] = [
     "get_temperature", "get_torque", "goto", "goto_rad", "grasp", "home",
     "is_connected", "is_enabled", "is_grasped", "is_moving", "load_calibration",
     "move_at_speed", "move_at_speed_rad", "move_to", "mst_id", "open", "poll",
-    "read_param", "save_calibration", "send_mit_frame", "set_force", "stop",
-    "wait_for_ready",
+    "read_param", "refresh_status", "save_calibration", "send_mit_frame",
+    "set_force", "stop", "wait_for_ready",
 ]
 
 
@@ -942,6 +995,64 @@ def _sdk_litegrip_class():
         return LiteGrip
     except Exception:
         return None
+
+
+#: shim 会从 SDK 转出的数据模型（`_litegrip/__init__.py` 的 `_SDK_NAMES`）。
+MIRRORED_TYPES = (
+    "GripperState", "GripperConfig", "GripperInfo", "GripperStatus",
+    "GripperMode", "CalibrationData", "GripperParams", "UnitConversion",
+    "ErrorCode", "DM_Motor_Type", "Control_Mode",
+)
+
+#: **有意的**偏离：仿真用真实毫米（85.452，非 SDK 名义的 120）与自洽的 θ 端点
+#: 符号（SDK 的 POS_OPEN_RAD 违反它自己文档的不变量）。理由见 constants.py。
+#: 注意 `GripperConfig.pos_closed_rad` 不在里面 —— 两边都是 0.0，本来就一致。
+DELIBERATE_DIVERGENCE = {
+    "GripperConfig": {"pos_open_rad", "max_stroke_mm", "rad_to_mm"},
+    "CalibrationData": {"max_position", "rad_to_mm"},
+    "UnitConversion": {"RAD_TO_MM", "MM_TO_RAD"},
+    # GripperParams 是同一组 θ 端点的第三份拷贝（另两份是 GripperConfig /
+    # CalibrationData），同样只差 POS_OPEN_RAD 的符号；POS_CLOSED_RAD 两边
+    # 都是 0.0，本来就不算偏离，别写进来（下一条用例要求列出的**确实**不同）。
+    "GripperParams": {"POS_OPEN_RAD"},
+}
+
+
+def _mirror_surface(cls):
+    """把 dataclass 字段 / Enum 成员 / 普通类属性统一成 {名字: 值的字面量}。
+
+    普通类属性这一支不能省：`ErrorCode` 既不是 dataclass 也不是 Enum，
+    早先只比 dataclass 字段的审计脚本因此漏掉了它缺三个错误码。
+    """
+    if dataclasses.is_dataclass(cls):
+        out = {}
+        for f in dataclasses.fields(cls):
+            out[f.name] = (
+                "<无默认>" if f.default is dataclasses.MISSING else repr(f.default)
+            )
+        return out
+    if isinstance(cls, type) and issubclass(cls, enum.Enum):
+        return {m.name: repr(m.value) for m in cls}
+    return {
+        n: repr(v)
+        for n, v in vars(cls).items()
+        if not n.startswith("_")
+        and not isinstance(v, (property, staticmethod, classmethod))
+        and not inspect.isfunction(v)
+    }
+
+
+def _mirror_members(cls):
+    """公开的属性与方法的**名字**（`GripperState` 的 has_data / is_stale 这类）。"""
+    if not inspect.isclass(cls):
+        return set()
+    return {
+        n
+        for n, v in vars(cls).items()
+        if not n.startswith("_")
+        and (isinstance(v, (property, staticmethod, classmethod))
+             or inspect.isfunction(v))
+    }
 
 
 class TestApiParity:
@@ -967,6 +1078,151 @@ class TestApiParity:
         # 快照本身也该与真类一致，否则下一个人会拿一份过期的清单去核对
         stale = sorted(set(LITEGRIP_PUBLIC_API) ^ sdk_api)
         assert not stale, f"LITEGRIP_PUBLIC_API 快照已过期，差异: {stale}"
+
+    def test_mirrors_match_installed_sdk(self):
+        """装了 SDK 就把 `_fallback` 的每个镜像类型逐字段对着真类比。
+
+        上面那个用例只管 `LiteGrip` 的**方法**，管不到 dataclass 的字段 ——
+        SDK 给 `GripperState` 加 `data_age_s`、给 `ErrorCode` 加三个错误码时，
+        就是从这个空子钻过去的：仿真照常能跑，只是那些名字悄悄缺了或吃了
+        错的默认值。这条用例把整张表都钉住，装了 SDK 就会自动跟着比。
+        """
+        from litegrip_mujoco._litegrip import _fallback as fb
+
+        if _sdk_litegrip_class() is None:
+            pytest.skip("litegrip SDK 未安装")
+
+        import litegrip
+
+        for name in MIRRORED_TYPES:
+            sdk_cls = getattr(litegrip, name)
+            loc_cls = getattr(fb, name)
+            skip = DELIBERATE_DIVERGENCE.get(name, set())
+
+            sdk_items, loc_items = _mirror_surface(sdk_cls), _mirror_surface(loc_cls)
+
+            missing = sorted(set(sdk_items) - set(loc_items))
+            assert not missing, (
+                f"{name}: 兜底镜像缺少 {missing}（SDK 有而 _fallback 没有）"
+            )
+
+            for key, sdk_val in sdk_items.items():
+                if key in skip:
+                    continue
+                assert loc_items[key] == sdk_val, (
+                    f"{name}.{key}: SDK={sdk_val} 兜底={loc_items[key]}"
+                )
+
+            # 字段顺序也算契约：dataclass 可以按位置构造，顺序错了会静默串位
+            if dataclasses.is_dataclass(sdk_cls):
+                sdk_order = [f.name for f in dataclasses.fields(sdk_cls)]
+                loc_order = [f.name for f in dataclasses.fields(loc_cls)]
+                assert loc_order == sdk_order, (
+                    f"{name}: 字段顺序与 SDK 不一致\n"
+                    f"  SDK : {sdk_order}\n  兜底: {loc_order}"
+                )
+
+            missing_members = sorted(_mirror_members(sdk_cls) - _mirror_members(loc_cls))
+            assert not missing_members, (
+                f"{name}: 兜底镜像缺少成员 {missing_members}"
+            )
+
+    def test_deliberate_divergences_still_diverge(self):
+        """有意的偏离必须**仍然**偏离，否则说明它们被谁"顺手对齐"了。
+
+        这条是反向断言：如果哪天有人把 `max_stroke_mm` 改成 SDK 的 120，
+        上面那条用例会照样通过（因为它跳过这个键），只有这条会失败。
+        """
+        from litegrip_mujoco._litegrip import _fallback as fb
+
+        # 与 SDK 无关，纯仿真侧也该成立：毫米基准是真实行程
+        assert fb.GripperConfig.max_stroke_mm == C.MM_SCALE == 85.452
+        assert fb.GripperConfig.pos_open_rad < fb.GripperConfig.pos_closed_rad, (
+            "θ 端点必须满足 SDK 自己文档写的不变量：闭合位数值更大"
+        )
+
+        if _sdk_litegrip_class() is None:
+            pytest.skip("litegrip SDK 未安装")
+
+        import litegrip
+
+        for name, keys in DELIBERATE_DIVERGENCE.items():
+            sdk_cls, loc_cls = getattr(litegrip, name), getattr(fb, name)
+            for key in keys:
+                sdk_val = _mirror_surface(sdk_cls).get(key)
+                loc_val = _mirror_surface(loc_cls).get(key)
+                assert sdk_val != loc_val, (
+                    f"{name}.{key} 与 SDK 变成一样了（{sdk_val}）—— "
+                    f"如果这是有意的，请一并更新 constants.py 与开发文档"
+                )
+
+    def test_exception_family_is_the_sdk_family(self):
+        """7 个异常类必须与 SDK 的**同一个类对象**，不只是同名。
+
+        仿真只抛 NotInitializedError，但共用代码里的 `except CommError:`
+        在纯仿真环境不能 ImportError，也不能接不住。
+        """
+        from litegrip_mujoco import _litegrip as shim
+
+        names = (
+            "LiteGripError", "NotInitializedError", "ConnectError", "CommError",
+            "CANTimeoutError", "HardwareError", "CommandError",
+        )
+        for name in names:
+            assert hasattr(shim, name), f"shim 没有转出 {name}"
+
+        if _sdk_litegrip_class() is None:
+            # 没装 SDK 时至少要保证兜底自己的层级是对的
+            for name in names[1:]:
+                assert issubclass(getattr(shim, name), shim.LiteGripError)
+            pytest.skip("litegrip SDK 未安装")
+
+        import litegrip
+
+        for name in names:
+            assert getattr(shim, name) is getattr(litegrip, name), (
+                f"{name} 不是 SDK 的类对象 —— 两侧的 except 会各接各的"
+            )
+
+    def test_describe_error_covers_every_error_code(self):
+        """`describe_error` 要认全 `ErrorCode` 里的每一个码。
+
+        SDK 加了 OV_FAULT / COMM_LOSS / OVERLOAD 三个码，镜像不能只加码
+        不加描述 —— 否则故障会显示成"未知错误"。SDK 没有导出
+        ``ERROR_DESCRIPTIONS`` 这个表（只导出函数），所以表是在兜底里维护的，
+        下面两个配置都要过：装了 SDK 时用 SDK 的函数验，没装时装不了的那支
+        用兜底自己的表验。
+        """
+        from litegrip_mujoco._litegrip import (
+            ErrorCode,
+            describe_error,
+            sdk_unavailable_reason,
+        )
+
+        # 码是不是**齐**由上一条用例（对着 SDK 比 surface）保证，这里只管
+        # "每个已知码都有描述"。少码不会漏 —— 漏了上一条会报缺名。
+        for name, value in vars(ErrorCode).items():
+            if name.startswith("_"):
+                continue
+            assert not describe_error(value).startswith("未知错误"), (
+                f"ErrorCode.{name} = {value:#x} 没有对应的描述"
+            )
+
+        # 未收录的码要有兜底文案，不能抛
+        assert "0x99" in describe_error(0x99)
+
+        # 描述文案本身也得两边一致 —— 上面验的是"有没有"，这里验"对不对"
+        from litegrip_mujoco._litegrip import _fallback as fb
+
+        if sdk_unavailable_reason() is not None:
+            pytest.skip("litegrip SDK 未安装 —— 表已由上面的用例验过")
+
+        import litegrip
+
+        for code, text in fb.ERROR_DESCRIPTIONS.items():
+            assert litegrip.describe_error(code) == text, (
+                f"{code:#x}: 兜底={text!r} SDK={litegrip.describe_error(code)!r}"
+            )
 
     def test_sim_only_extras_are_documented(self):
         """仿真独有的成员必须与 SDK 的名字不冲突。"""

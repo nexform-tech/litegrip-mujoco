@@ -6,7 +6,7 @@ code runs identically in simulation and on hardware.
 
 ## Features
 
-- 🔄 **Drop-in API compatibility** — all 43 public `LiteGrip` members, same names, same meanings.
+- 🔄 **Drop-in API compatibility** — all 44 public `LiteGrip` members, same names, same meanings.
 - 🖥️ **Three operating modes** — Standalone simulation / Mirror tracking / Dual control.
 - 🎮 **Native MuJoCo rendering** — real-time visualization of jaw motion, contact and grasp.
 - 🧪 **No hardware required** — `--dry-run` runs the mirror and dual-control examples without CAN.
@@ -160,7 +160,8 @@ the same meaning.
 | `grasp(force_n)` | `grasp(force_n)` | ✅ Identical, including the overshoot |
 | `set_force(force_n)` | `set_force(force_n)` | ✅ Identical, target = current position |
 | `home()` | `home()` | ⚠️ See *Known behaviour* |
-| `get_state()` / `get_position()` / `get_position_rad()` | same | ✅ Identical |
+| `get_state()` / `get_position()` / `get_position_rad()` | same | ✅ Identical (see *State freshness*) |
+| `refresh_status(timeout_s)` | `refresh_status(timeout_s)` | ✅ Always `True` — sim state is always readable |
 | `get_force()` / `get_torque()` / `get_error()` | same | ✅ Identical |
 | `get_temperature()` / `get_info()` | same | ✅ Simulated thermal model |
 | `is_moving()` / `is_grasped()` / `wait_for_ready()` | same | ✅ Identical |
@@ -205,6 +206,20 @@ predicting the hardware.
   `0.0`, and `goto_rad()`'s clamp then drives the gripper **open** — the opposite of its
   docstring. The simulation goes to the closed position, as documented. This is a deliberate
   divergence: the examples should not teach the bug.
+
+### State freshness
+
+The SDK's `GripperState` carries `data_age_s` (how long ago the frame behind these numbers
+arrived), plus `has_data` and `is_stale` (default threshold `STALE_AFTER_S = 0.5 s`). A
+disabled motor does not stream status frames, so on hardware `get_state()` can hand back a
+snapshot that is seconds old, or the constructor defaults from before the first enable —
+which is exactly why `refresh_status()` exists.
+
+Simulation has no such problem: every `get_state()` is computed from the physics state
+*right then*, so `data_age_s` is always `0.0` and `is_stale` is always `False`. That is
+deliberate — it reflects the absence of a CAN link, not a change to the SDK's semantics.
+Real-machine code that uses `is_stale` to decide whether to re-read will simply always take
+the "fresh" branch under simulation, which is correct.
 
 ### Two bugs found in the `litegrip` SDK
 

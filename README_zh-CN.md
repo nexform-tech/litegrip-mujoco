@@ -6,7 +6,7 @@ API 与 `litegrip` SDK 完全兼容 —— 把 `LiteGrip` 换成 `MujocoGripper`
 
 ## 特性
 
-- 🔄 **可直接替换的 API** —— `LiteGrip` 的 43 个公开成员，名字与语义逐一对应。
+- 🔄 **可直接替换的 API** —— `LiteGrip` 的 44 个公开成员，名字与语义逐一对应。
 - 🖥️ **三种运行模式** —— 独立仿真 / 镜像跟随 / 双控。
 - 🎮 **原生 MuJoCo 渲染** —— 实时显示指爪运动、接触与抓取。
 - 🧪 **不需要硬件** —— 镜像与双控例程带 `--dry-run`，无 CAN 也能跑通全流程。
@@ -155,7 +155,8 @@ python3 examples/05_dual_control.py --dry-run
 | `grasp(force_n)` | 同名 | ✅ 一致，包括超出请求值的部分 |
 | `set_force(force_n)` | 同名 | ✅ 一致，目标 = 当前位置 |
 | `home()` | 同名 | ⚠️ 见"已知行为" |
-| `get_state()` / `get_position()` / `get_position_rad()` | 同名 | ✅ 一致 |
+| `get_state()` / `get_position()` / `get_position_rad()` | 同名 | ✅ 一致（见"状态新鲜度"） |
+| `refresh_status(timeout_s)` | 同名 | ✅ 恒 `True` —— 仿真状态随时可读 |
 | `get_force()` / `get_torque()` / `get_error()` | 同名 | ✅ 一致 |
 | `get_temperature()` / `get_info()` | 同名 | ✅ 用仿真热模型 |
 | `is_moving()` / `is_grasped()` / `wait_for_ready()` | 同名 | ✅ 一致 |
@@ -195,6 +196,19 @@ python3 examples/05_dual_control.py --dry-run
 - **`home()` 与 SDK 不同。** SDK 的 `home()` 目标取常量 `POS_CLOSED_RAD`（= `0.0`），
   再叠加 `goto_rad()` 的 clamp bug，实际会驱动夹爪**张开**，与它自己的 docstring
   相反。仿真走的是闭合位，与文档一致。这是刻意的偏离 —— 例程不该示范这个 bug。
+
+### 状态新鲜度
+
+SDK 的 `GripperState` 带 `data_age_s`（这批数值来自多久以前的那一帧）、`has_data`
+与 `is_stale`（默认阈值 `STALE_AFTER_S = 0.5 s`）。失能的电机不主动发状态帧，
+所以真机上 `get_state()` 完全可能返回一个几秒前的快照，或使能前的构造默认值 ——
+这正是 `refresh_status()` 存在的理由。
+
+仿真里没有这个问题：每次 `get_state()` 都是**当场**从物理状态算出来的，
+所以 `data_age_s` 恒为 `0.0`，`is_stale` 恒为 `False`。这是刻意的——
+它反映的是"仿真没有 CAN 链路"这个事实，不是把 SDK 的语义改掉了。
+真机代码如果靠 `is_stale` 判断要不要重读，在仿真上会一直走"新鲜"分支，
+这是对的。
 
 ### `litegrip` SDK 里发现的两个 bug
 

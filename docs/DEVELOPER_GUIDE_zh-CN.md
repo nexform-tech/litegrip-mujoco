@@ -238,14 +238,64 @@ arena，`mj_makeConstraint` 无法扩容，于是报
 
 ## SDK shim
 
-`_litegrip/` **惰性且只探测一次**真 `litegrip` 包。装了就把它的 dataclass 和枚举
-再导出；没装就用 `_fallback.py` 里逐字段对齐的本地镜像，这样 `get_state()` 仍然
-返回真正的 `GripperState`。
+`_litegrip/` **惰性且只探测一次**真 `litegrip` 包。装了就把它的 dataclass、枚举、
+异常和辅助函数再导出；没装就用 `_fallback.py` 里逐字段对齐的本地镜像，这样
+`get_state()` 仍然返回真正的 `GripperState`。
 
-不 vendor SDK，因为 import 它会拖进 SocketCAN。`_fallback.py` 里唯一一处刻意的分歧
-是默认 `GripperConfig`：它用仿真侧自洽的取值（`pos_closed_rad = 0.0`、
-`pos_open_rad = -1.14`、`max_stroke_mm = 85.452`），而 SDK 的默认值违反了它自己
-文档写的不变量。
+不 vendor SDK，因为 import 它会拖进 SocketCAN。
+
+### 跟得有多紧
+
+耦合分三层，**不是每一层都会自动跟随 SDK**：
+
+1. **数据类型 —— 自动跟随。** shim 在 import 时从 SDK 解析每个名字，所以
+   `GripperState`、`GripperConfig`、`ErrorCode`、`DM_Motor_Type`、`Control_Mode`、
+   `ERROR_DESCRIPTIONS`、`describe_error`、`STALE_AFTER_S` 和 7 个异常类都是
+   已安装 SDK 里的那个。`isinstance(state, litegrip.GripperState)` 成立。
+2. **控制语义 —— 手工复刻，不跟随。** 控制器增益、堵转窗口、min-jerk 斜坡、
+   `grasp()` 改写目标那一步。这些是读 SDK 源码照抄的；上游改了，这里必须跟着改。
+3. **常量 —— 有意不 import。** `constants.py` 自己拥有仿真侧的数字（85.452 mm、
+   θ 端点），不能继承 SDK 的默认值。
+
+异常属于第 1 层，但有个值得知道的讲究：shim 把这些名字绑到 SDK 的**类对象**上，
+而不是本地同名类。`except litegrip.LiteGripError:` 必须接得住仿真抛出的异常，而
+仅仅同名的两个类接不住。
+
+### 刻意的偏离
+
+`_fallback.py` 只在**一组数值**上偏离 SDK，散落在四个类型里，全部记在测试文件的
+`DELIBERATE_DIVERGENCE` 中：
+
+- **`GripperConfig`、`CalibrationData`、`GripperParams`、`UnitConversion`** ——
+  同样两个事实抄了四份：`max_stroke_mm` 是 85.452（不是名义的 120），`rad_to_mm`
+  由它推出，`pos_open_rad` 是 `-1.14` 而不是 `+1.14`，因为 SDK 那一对违反了它自己
+  文档写的不变量（闭合端数值应当更大）。见"毫米标定口径"。注意 `pos_closed_rad`
+  两边都是 `0.0`，**不**在表里 —— 守住这张表的用例要求列出的键确实不同。
+
+两处**不是**偏离、但看着像的命名细节：
+
+- **枚举类名**在 `_fallback.py` 里用 SDK 的真名 —— `MotorType`、`ControlMode` ——
+  另在模块级保留 `DM_Motor_Type` / `Control_Mode` 两个别名。SDK 就是这么做的；
+  跟着做 `repr()` 才一致，而 `GripperParams.MOTOR_TYPE` 的 repr 是会进日志的。
+- **`home()`** 目标是闭合位，而 SDK 自己的 clamp bug 会把它驱动向**张开**。
+  这处偏离在 `gripper.py` 而不是 shim 里，见"已知行为"。
+
+其余全部由 `test_mirrors_match_installed_sdk` 对着已安装的 SDK 逐字段比对，
+包括字段顺序（dataclass 可以按位置构造）和 `GripperState.is_stale` 这类公开成员。
+`test_deliberate_divergences_still_diverge` 是它的镜像面：上面那几组值一旦被谁
+"顺手对齐"回 SDK，它会失败。
+
+### 状态新鲜度
+
+SDK 在每个 `GripperState` 上记 `data_age_s`（这批数值来自多久以前的那一帧），
+并由此推出 `has_data` 与 `is_stale`（`STALE_AFTER_S`，默认 0.5 s）。这在真机上
+有意义：失能的电机不主动发状态帧，`get_state()` 可能返回几秒前的快照或使能前的
+默认值 —— `refresh_status()` 就是为这个存在的。
+
+仿真没有 CAN 链路，所以 `MujocoGripper.get_state()` 与 `DryRunGripper.get_state()`
+都传 `data_age_s=0.0`：数值是当场算出来的。于是 `is_stale` 恒为 `False`。
+`refresh_status()` 保持 SDK 的形状 —— 先 `_check_connected()`，未连接时抛
+`NotInitializedError` —— 然后直接返回 `True`，因为没有任何东西需要去问。
 
 ## 测试
 
@@ -260,9 +310,25 @@ python -m pytest tests/ -v
 - **行为** —— 公开 API，对照 SDK 语义。
 - **物理保真** —— 上面那些反直觉的行为被固化成测试，理由写在 docstring 里，
   以免以后被人"顺手修好"。
+- **SDK 对等** —— `TestApiParity` 这一类。`test_matches_installed_sdk` 钉住
+  44 个公开成员的快照，`test_mirrors_match_installed_sdk` 把每个镜像的 dataclass、
+  枚举和常量类对着已安装的 SDK 逐字段比对，`test_exception_family_is_the_sdk_family`
+  检查 7 个异常名解析到的是 SDK 的**类对象**。这一层专门抓上游漂移：SDK 多一个
+  字段、多一个错误码、多一个方法，它会响亮地失败，而不是让仿真悄悄缺一块。
 
 测试套件不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。需要 SDK 的用例在
 SDK 缺席时自行 skip。
+
+推送前**两种配置都要跑** —— 装了 SDK 和没装 SDK 走的是不同代码路径
+（`shim → SDK` 与 `shim → _fallback`），而且只有装了的那次能看见漂移：
+
+```bash
+# 装了 SDK
+python -m pytest tests/ -q
+
+# 没装 —— 把 PYTHONPATH 指向 src，用一个没有 litegrip 的解释器
+PYTHONPATH=src python3 -m pytest tests/ -q
+```
 
 如果改了接触参数，`test_grasp_force_exceeds_request` 会失败，并把你指向
 `litegrip.xml` 里的对照表。两处要一起改。
