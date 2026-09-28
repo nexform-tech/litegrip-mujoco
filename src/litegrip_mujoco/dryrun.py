@@ -314,9 +314,19 @@ class DryRunGripper:
             temperature_coil=inner.temperature_coil,
             error_code=inner.error_code,
             timestamp=inner.timestamp,
+            data_age_s=0.0,   # 虚拟夹爪背后是仿真，读数随时可算，永不陈旧
             position_mm=position_mm,
             force_n=C.nm_to_n(torque),
         )
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        """虚拟夹爪没有 CAN 链路，状态随时可读 —— 恒 True。
+
+        转给内层仿真做，而不是自己判断：内层才有 ``_check_connected``，
+        未连接时该抛 ``NotInitializedError``（SDK 的 ``refresh_status`` 第一句
+        就是 ``self._check_connected()``）。
+        """
+        return self._inner.refresh_status(timeout_s=timeout_s)
 
     def get_position(self) -> float:
         return self.get_state().position_mm

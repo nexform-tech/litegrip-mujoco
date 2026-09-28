@@ -30,8 +30,22 @@ from . import _fallback as _fb
 #: 真 SDK 是否可用。由下面的惰性探测决定。
 HAS_SDK: bool = False
 
-#: 真 SDK 的异常基类（未安装时用兜底版本）。
-NotInitializedError: type = _fb.NotInitializedError
+#: SDK 的异常族。仿真只会抛 NotInitializedError，但其余几个也必须能 import ——
+#: 否则共用代码里的 `except CommError:` 在纯仿真环境会 ImportError。
+_EXC_NAMES = (
+    "LiteGripError",
+    "NotInitializedError",
+    "ConnectError",
+    "CommError",
+    "CANTimeoutError",
+    "HardwareError",
+    "CommandError",
+)
+
+# 兜底绑定：SDK 缺席时用本地镜像。
+for _n in _EXC_NAMES:
+    globals()[_n] = getattr(_fb, _n)
+del _n
 
 _sdk_module: Optional[Any] = None
 _sdk_error: Optional[BaseException] = None
@@ -39,7 +53,7 @@ _sdk_error: Optional[BaseException] = None
 
 def _probe() -> Optional[Any]:
     """尝试 import 真 SDK；只试一次，结果缓存。"""
-    global _sdk_module, _sdk_error, HAS_SDK, NotInitializedError
+    global _sdk_module, _sdk_error, HAS_SDK
     if _sdk_module is not None or _sdk_error is not None:
         return _sdk_module
     try:
@@ -49,8 +63,11 @@ def _probe() -> Optional[Any]:
         return None
     _sdk_module = litegrip
     HAS_SDK = True
-    if hasattr(litegrip, "NotInitializedError"):
-        NotInitializedError = litegrip.NotInitializedError  # type: ignore[assignment]
+    # 抛出的异常必须是 SDK 的类对象，不能是本地同名类：真机侧写
+    # `except litegrip.LiteGripError` 要能接住仿真抛出的异常。
+    for name in _EXC_NAMES:
+        if hasattr(litegrip, name):
+            globals()[name] = getattr(litegrip, name)
     return _sdk_module
 
 
@@ -67,6 +84,10 @@ _SDK_NAMES = (
     "GripperParams",
     "UnitConversion",
     "ErrorCode",
+    "DM_Motor_Type",
+    "Control_Mode",
+    "ERROR_DESCRIPTIONS",
+    "describe_error",
 )
 
 for _name in _SDK_NAMES:
@@ -76,9 +97,17 @@ for _name in _SDK_NAMES:
         globals()[_name] = getattr(_fb, _name)
 del _name
 
-__all__ = list(_SDK_NAMES) + [
+# STALE_AFTER_S 不在 SDK 的包级命名空间里，它在 `litegrip.models`。
+# 单独取一次，这样 SDK 改了阈值仿真会跟着改，而不是各写各的 0.5。
+STALE_AFTER_S: float = _fb.STALE_AFTER_S
+if _sdk_module is not None:
+    _models = getattr(_sdk_module, "models", None)
+    if _models is not None and hasattr(_models, "STALE_AFTER_S"):
+        STALE_AFTER_S = _models.STALE_AFTER_S
+
+__all__ = list(_SDK_NAMES) + list(_EXC_NAMES) + [
+    "STALE_AFTER_S",
     "HAS_SDK",
-    "NotInitializedError",
     "load_litegrip",
     "sdk_unavailable_reason",
 ]

@@ -657,7 +657,16 @@ class MujocoGripper:
     # ══════════════════════════════════════════════════════════════════
 
     def get_state(self, wait: bool = True) -> GripperState:
-        """返回一帧状态快照。``wait`` 在仿真里无意义（保留以对齐签名）。"""
+        """返回一帧状态快照。``wait`` 在仿真里无意义（保留以对齐签名）。
+
+        与真机的一处**刻意差异**：``data_age_s`` 恒为 ``0.0``，于是 ``is_stale``
+        恒为 ``False``、``has_data`` 恒为 ``True``。真机上这个字段是有意义的 ——
+        失能的电机不主动发状态帧，``get_state()`` 返回的是缓存或构造默认值，
+        所以 SDK 给它 ``inf`` 默认值让调用方能识别"这不是当前测量"。
+        仿真里状态是从 ``mjData`` 直接算出来的，**定义上瞬时且精确**，没有
+        陈旧可言。照抄 ``inf`` 会让 `if state.is_stale: 丢弃读数` 在仿真里
+        永远为真，把一次好读数当成坏读数丢掉。
+        """
         self._check_connected()
         with self._lock:
             theta = self._theta()
@@ -672,9 +681,24 @@ class MujocoGripper:
             temperature_coil=int(round(self._temp_coil)),
             error_code=self._error_code,
             timestamp=time.time(),
+            data_age_s=0.0,
             position_mm=C.q_to_mm(q),
             force_n=C.nm_to_n(torque),
         )
+
+    def refresh_status(self, timeout_s: float = 0.5) -> bool:
+        """请求一帧状态。仿真里恒返回 ``True``。
+
+        真机上这个方法是为了**失能状态下也能读到位置**：失能的电机不主动发
+        状态帧，``get_state()`` 只会返回缓存，所以 SDK 发 0xCC 刷新命令主动
+        要一帧（电机不管使能与否都会应答）。仿真里状态随时可读，没有这个
+        问题，所以直接返回 True；``timeout_s`` 保留以对齐签名。
+
+        保留这个方法本身是必要的：真机代码里 ``real.refresh_status()`` 换成
+        ``MujocoGripper`` 之后不能变成 ``AttributeError``。
+        """
+        self._check_connected()
+        return True
 
     def get_position(self) -> float:
         """当前行程 (mm)。0 = 闭合，``MM_SCALE`` = 全开。"""
