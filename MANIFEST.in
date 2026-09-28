@@ -1,0 +1,4 @@
+# MJCF 模型与 STL 网格是**运行时资源**，不是可选文件 —— 少了它们
+# `import litegrip_mujoco` 之后第一次构造就会 FileNotFoundError。
+include src/litegrip_mujoco/assets/*.xml
+include src/litegrip_mujoco/assets/meshes/*.STL

@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litegrip-mujoco"
+# 占位符，不是版本号：版本由 semantic-release 在 CI 里从 commit 前缀算出，
+# git tag 是唯一事实来源（AGENTS.md §3），所以永远不要把它改成真实数字。
+#
+# 仓库标准把占位符写作 `0.0.0-semantic-release`，那是合法的 semver，但**不是**
+# 合法的 PEP 440 —— pip/setuptools 会直接拒绝整个 pyproject.toml，
+# `pip install -e .` 在干任何事之前就失败。把标记挪进 local version 段可以在
+# 合法 PEP 440 里保持同样的含义（`0.0.0`，标记为 "semantic-release"）。
+# 规范化后是 `0.0.0+semantic.release`。
+version = "0.0.0+semantic-release"
+description = "LiteGrip 平行两指夹爪 MuJoCo 仿真 — API 与 litegrip SDK 兼容，支持仿真与真机同时运动"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "LicenseRef-Proprietary"
+authors = [{ name = "hzh" }]
+keywords = ["robotics", "gripper", "litegrip", "mujoco", "simulation"]
+dependencies = [
+    "mujoco>=3.0",
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-timeout"]
+# 只有在要接真机/用镜像模式时才需要 SDK。纯仿真不必装。
+mirror = ["litegrip"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"litegrip_mujoco" = ["assets/*.xml", "assets/meshes/*.STL"]
+
+# 纯仿真包里**不含任何 CAN 依赖**，所以测试不需要硬件也不需要 can0。
+# 涉及 SDK 的用例在 SDK 缺席时自行 skip（见 tests 里的 pytest.skip）。
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
