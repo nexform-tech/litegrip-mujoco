@@ -378,6 +378,13 @@ python3 -m pytest tests/ -v
 测试套件是纯仿真的 —— 不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。
 需要 SDK 的用例在 SDK 缺席时会自行 skip。
 
+### Dev 容器
+
+仓库自带预装全部依赖的 dev 容器配置（[.devcontainer/](.devcontainer/)）。在 VS Code 中打开
+仓库，执行 `F1 → Dev Containers: Rebuild and Reopen in Container`，即可得到现成的环境
+—— Python 3.11、MuJoCo、测试套件、查看器所需的 GL 运行时。交互式查看器在 Windows 上需要的
+X11 配置见 [.devcontainer/README.zh-CN.md](.devcontainer/README.zh-CN.md)。
+
 模型结构、毫米标定口径、标定闸与碰撞几何的设计取舍见
 [docs/DEVELOPER_GUIDE_zh-CN.md](docs/DEVELOPER_GUIDE_zh-CN.md)。
 

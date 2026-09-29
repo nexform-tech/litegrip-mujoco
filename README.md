@@ -404,6 +404,14 @@ python3 -m pytest tests/ -v
 The suite is pure simulation — no CAN interface, no hardware, no `litegrip` SDK. Cases that
 need the SDK skip themselves when it is absent.
 
+### Dev container
+
+A dev container with the full dependency set preinstalled ships in [.devcontainer/](.devcontainer/).
+Open the repository in VS Code and run `F1 → Dev Containers: Rebuild and Reopen in Container`,
+and the environment — Python 3.11, MuJoCo, the test suite, the GL runtime for the viewer — is
+ready. [.devcontainer/README.md](.devcontainer/README.md) covers the X11 setup the interactive
+viewer needs on Windows.
+
 See [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for the model layout, the millimetre
 basis, the calibration guard, and the design decisions behind the collision geometry.
 
