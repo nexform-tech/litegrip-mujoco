@@ -1,0 +1,51 @@
+// VS Code dev container for litegrip-mujoco.
+//
+// Opens the repository in a container with every dependency preinstalled:
+// F1 -> "Dev Containers: Rebuild and Reopen in Container".
+// Details: .devcontainer/README.md (English) and README.zh-CN.md (Chinese).
+{
+  "name": "litegrip-mujoco",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+
+  // gh CLI (required by AGENTS.md) and Node 22 (the version CI runs the
+  // markdown lint with).
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+
+  // Editable install of the package with dev extras, then a test run so a
+  // fresh container proves itself. sudo: the container runs as the non-root
+  // `vscode` user while site-packages is root-owned. The pip cache lives on
+  // a named volume so rebuilds do not re-download the mujoco wheel.
+  "postCreateCommand": "sudo python -m pip install --upgrade pip && sudo python -m pip install -e '.[dev]' && python -m pytest tests/ -q",
+
+  // The MuJoCo viewer window renders over X11 to an X server on the Windows
+  // host (VcXsrv, display 0, access control disabled). Delete this block for
+  // headless-only use; see .devcontainer/README.md.
+  "remoteEnv": {
+    "DISPLAY": "host.docker.internal:0.0"
+  },
+
+  "mounts": [
+    "type=volume,source=litegrip-mujoco-pip-cache,target=/root/.cache/pip"
+  ],
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/python/current/bin/python",
+        "python.testing.pytestEnabled": true,
+        "python.testing.pytestArgs": ["tests"]
+      }
+    }
+  }
+}
