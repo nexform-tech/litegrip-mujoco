@@ -19,6 +19,14 @@
   指的是完全不同的开度，直接对拷必然错位。`frac_open ∈ [0,1]` 是唯一与
   标定口径无关的量，所以跨设备只交换它。
 
+⚠ 真机运动前**必须选定一份标定文件**，且不会替你选默认的那份。标定文件由上位机
+  （GUI）标定得到。两种选法：
+    --calibration <路径>        显式指定（非交互脚本用这个）
+    直接运行                    在终端里弹出候选列表让你挑；非交互终端会直接报错退出
+
+  为什么镜像也要求标定：读出来的 `frac_open` 是由 `config` 的 θ 端点算的，
+  端点没标定过就只是个编出来的数 —— 画出来的姿态会与真机对不上。
+
 前置（只做一次 · 在仓库根目录）:
   pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
 
@@ -26,8 +34,12 @@
   python3 examples/04_mirror_real.py --dry-run
   python3 examples/04_mirror_real.py --dry-run --noise      # 带传感器噪声
 
-运行（真机 · 需要 can0 已配置、24V 上电、已完成标定）:
+运行（真机 · 需要 can0 已配置、24V 上电）:
+  python3 examples/04_mirror_real.py --calibration ~/.litegrip/litegrip_calibration.json
   python3 examples/04_mirror_real.py --channel can0 --can-id 0x08
+
+查看有哪些候选标定文件:
+  python3 examples/04_mirror_real.py --list-calibrations
 
 ⚠ 真机模式会让夹爪**真实运动**。先确认行程内没有手、线缆和障碍物。
 """
@@ -37,11 +49,17 @@ import time
 
 from litegrip_mujoco import (
     HAS_SDK,
+    CalibrationError,
     DryRunGripper,
     MujocoGripper,
     MirrorMode,
+    apply_calibration,
+    describe_candidate,
+    discover_calibrations,
+    format_selection,
     read_frac_open,
     require_sdk,
+    resolve_calibration_path,
     sdk_unavailable_reason,
 )
 
@@ -73,10 +91,43 @@ def make_real(args):
                         mst_id=args.mst_id)
 
 
+def list_calibrations():
+    """打印候选标定文件及其端点。"""
+    candidates = discover_calibrations()
+    if not candidates:
+        print("没有找到候选标定文件。标定文件由上位机（GUI）标定后生成，")
+        print("默认写在 ~/.litegrip/，也可以放在当前目录。")
+        return
+    print(f"候选标定文件（{len(candidates)} 个）:")
+    for index, path in enumerate(candidates, start=1):
+        print(f"  {index}) {path}")
+        print(f"     {describe_candidate(path)}")
+
+
+def resolve_calibration(args):
+    """真机运动前选定标定文件；--dry-run 下不接触真机，直接跳过。
+
+    这一步刻意排在 SDK 检查**之前**：标定是物理安全的前置条件，不该因为
+    环境里少了别的什么就先被跳过。
+    """
+    if args.dry_run:
+        print("  [标定] --dry-run 不接触真机，跳过标定选择。")
+        if args.calibration:
+            print(f"         已忽略 --calibration {args.calibration}。")
+        return None
+    try:
+        path = resolve_calibration_path(args.calibration)
+    except CalibrationError as exc:
+        print(f"\n{exc}")
+        sys.exit(2)
+    print(format_selection(path))
+    return path
+
+
 def drive_script(real, mirror):
     """在真机上跑一段脚本动作，每步打印两侧开度。"""
     def show(label):
-        frac = read_frac_open(real, warn=False)
+        frac = read_frac_open(real)
         sim_frac = mirror.last_frac_open
         delta = "" if sim_frac is None else f"  Δ={frac - sim_frac:+.4f}"
         print(f"  {label:22s} 真机 {frac:6.3f}"
@@ -122,7 +173,19 @@ def main():
     ap.add_argument("--noise", action="store_true",
                     help="--dry-run 时给读数加传感器噪声")
     ap.add_argument("--no-render", action="store_true", help="不开可视化窗口")
+    ap.add_argument("--calibration", default=None, metavar="PATH",
+                    help="本次真机运动使用的标定 JSON；"
+                         "缺省则交互式选择（非交互终端会直接报错）")
+    ap.add_argument("--list-calibrations", action="store_true",
+                    help="列出候选标定文件后退出")
     args = ap.parse_args()
+
+    if args.list_calibrations:
+        list_calibrations()
+        sys.exit(0)
+
+    hdr("[0] 选择标定文件")
+    cal_path = resolve_calibration(args)
 
     hdr("[1] 建立设备")
     real = make_real(args)
@@ -141,11 +204,16 @@ def main():
     mirror = None
     try:
         real.connect()
+        # 套用标定并**逐字段校验**，且严格排在 enable() 之前 ——
+        # enable() 是第一个会给电机上电的调用。
+        if cal_path is not None:
+            calibration = apply_calibration(real, cal_path)
+            print(f"  [标定] 已载入并通过校验: {calibration.path}")
         real.enable()
         print("  两台设备就绪。")
 
         # ── 先让仿真对齐真机的当前开度 ──
-        frac0 = read_frac_open(real, warn=True)
+        frac0 = read_frac_open(real)
         sim.set_frac_open(frac0)
         sim.settle(0.2)
         print(f"  仿真已对齐到真机当前开度 {frac0:.4f}"
@@ -170,7 +238,7 @@ def main():
               f"（目标 {args.rate:.0f} Hz）")
         last = mirror.last_frac_open
         print(f"  最近开度   {'(尚未采样)' if last is None else f'{last:.4f}'}")
-        real_frac = read_frac_open(real, warn=False)
+        real_frac = read_frac_open(real)
         sim_frac = sim.frac_open()
         print(f"  真机 {real_frac:.4f}  仿真 {sim_frac:.4f}"
               f"  Δ = {real_frac - sim_frac:+.4f}")
@@ -179,6 +247,10 @@ def main():
         print("   下一步：examples/05_dual_control.py 反过来——"
               "一条指令同时下发两边")
 
+    except CalibrationError as exc:
+        # 标定没套上就绝不使能 —— 上面已经把 apply_calibration 排在 enable 之前
+        print(f"\n{exc}")
+        sys.exit(2)
     except KeyboardInterrupt:
         print("\n\n用户中断")
     finally:

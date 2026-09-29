@@ -56,6 +56,10 @@ class DryRunGripper:
         ...
     """
 
+    #: 端点由内部仿真给出，不是标定的产物 —— 因此不需要（也不应该）套用
+    #: 真机标定文件。见 `litegrip_mujoco.calibration`。
+    IS_SIMULATED = True
+
     def __init__(
         self,
         model_path: Optional[str] = None,

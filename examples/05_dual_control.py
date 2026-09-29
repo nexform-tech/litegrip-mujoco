@@ -23,14 +23,23 @@
 
 ⚠ ``close()`` 是**合拢夹爪**，不是释放资源。释放资源用 ``disconnect()``。
 
+⚠ 真机运动前**必须选定一份标定文件**，且不会替你选默认的那份。标定文件由上位机
+  （GUI）标定得到。两种选法：
+    --calibration <路径>        显式指定（非交互脚本用这个）
+    直接运行                    在终端里弹出候选列表让你挑；非交互终端会直接报错退出
+
 前置（只做一次 · 在仓库根目录）:
   pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
 
 运行（无硬件，用虚拟夹爪顶替真机）:
   python3 examples/05_dual_control.py --dry-run
 
-运行（真机 · 需要 can0 已配置、24V 上电、已完成标定）:
+运行（真机 · 需要 can0 已配置、24V 上电）:
+  python3 examples/05_dual_control.py --calibration ~/.litegrip/litegrip_calibration.json
   python3 examples/05_dual_control.py --channel can0 --can-id 0x08
+
+查看有哪些候选标定文件:
+  python3 examples/05_dual_control.py --list-calibrations
 
 ⚠ 真机模式会让夹爪**真实运动**。先确认行程内没有手、线缆和障碍物。
 """
@@ -38,7 +47,16 @@ import argparse
 import sys
 import time
 
-from litegrip_mujoco import HAS_SDK, DualGripper, sdk_unavailable_reason
+from litegrip_mujoco import (
+    HAS_SDK,
+    CalibrationError,
+    DualGripper,
+    describe_candidate,
+    discover_calibrations,
+    format_selection,
+    resolve_calibration_path,
+    sdk_unavailable_reason,
+)
 
 
 def hdr(text):
@@ -55,6 +73,39 @@ def check_args(args):
         sys.exit(2)
 
 
+def list_calibrations():
+    """打印候选标定文件及其端点。"""
+    candidates = discover_calibrations()
+    if not candidates:
+        print("没有找到候选标定文件。标定文件由上位机（GUI）标定后生成，")
+        print("默认写在 ~/.litegrip/，也可以放在当前目录。")
+        return
+    print(f"候选标定文件（{len(candidates)} 个）:")
+    for index, path in enumerate(candidates, start=1):
+        print(f"  {index}) {path}")
+        print(f"     {describe_candidate(path)}")
+
+
+def resolve_calibration(args):
+    """真机运动前选定标定文件；--dry-run 下不接触真机，直接跳过。
+
+    这一步刻意排在 SDK 检查**之前**：标定是物理安全的前置条件，不该因为
+    环境里少了别的什么就先被跳过。
+    """
+    if args.dry_run:
+        print("  [标定] --dry-run 不接触真机，跳过标定选择。")
+        if args.calibration:
+            print(f"         已忽略 --calibration {args.calibration}。")
+        return None
+    try:
+        path = resolve_calibration_path(args.calibration)
+    except CalibrationError as exc:
+        print(f"\n{exc}")
+        sys.exit(2)
+    print(format_selection(path))
+    return path
+
+
 def report(dual, label):
     """跑完一条指令后比对两侧。"""
     time.sleep(0.3)
@@ -67,23 +118,23 @@ def report(dual, label):
 
 
 def run(dual):
-    hdr("[1] 位置控制 —— 两边同时")
+    hdr("[2] 位置控制 —— 两边同时")
     dual.open(duration=1.0)
     report(dual, "open()")
     dual.close(duration=1.0)
     report(dual, "close()")
 
-    hdr("[2] 绝对位置 —— move_to_frac（跨设备安全口径）")
+    hdr("[3] 绝对位置 —— move_to_frac（跨设备安全口径）")
     for frac in (0.25, 0.5, 0.75, 1.0):
         dual.move_to_frac(frac, duration=0.6)
         report(dual, f"move_to_frac({frac:.2f})")
 
-    hdr("[3] 绝对位置 —— goto(mm)，需要真机行程已标定为 85.452")
+    hdr("[4] 绝对位置 —— goto(mm)，需要真机行程已标定为 85.452")
     for mm in (0.0, 20.0, 42.726, 85.452):
         dual.goto(mm, duration=0.6)
         report(dual, f"goto({mm:.3f} mm)")
 
-    hdr("[4] 抓取 —— 真机走它自己的堵转检测")
+    hdr("[5] 抓取 —— 真机走它自己的堵转检测")
     dual.move_to_frac(1.0, duration=0.6)
     t0 = time.monotonic()
     real_ok, sim_ok = dual.grasp(force_n=10.0, duration=3.0)
@@ -96,12 +147,12 @@ def run(dual):
     print(f"  真机 force_n={rs.force_n:7.3f} N   "
           f"仿真 force_n={ss.force_n:7.3f} N")
 
-    hdr("[5] 力控 —— 在当前位置施加夹持力")
+    hdr("[6] 力控 —— 在当前位置施加夹持力")
     dual.set_force(8.0, duration=0.3)
     print(f"  真机 {dual.get_real_state().force_n:7.3f} N"
           f"   仿真 {dual.get_sim_state().force_n:7.3f} N")
 
-    hdr("[6] 张开 —— 收尾")
+    hdr("[7] 张开 —— 收尾")
     dual.open(duration=1.0)
     report(dual, "open()")
 
@@ -119,10 +170,22 @@ def main():
     ap.add_argument("--no-render", action="store_true", help="不开可视化窗口")
     ap.add_argument("--no-mirror-first", action="store_true",
                     help="启动时不先让仿真对齐真机开度")
+    ap.add_argument("--calibration", default=None, metavar="PATH",
+                    help="本次真机运动使用的标定 JSON；"
+                         "缺省则交互式选择（非交互终端会直接报错）")
+    ap.add_argument("--list-calibrations", action="store_true",
+                    help="列出候选标定文件后退出")
     args = ap.parse_args()
+
+    if args.list_calibrations:
+        list_calibrations()
+        sys.exit(0)
+
+    hdr("[0] 选择标定文件")
+    cal_path = resolve_calibration(args)
     check_args(args)
 
-    hdr("[0] 建立双控")
+    hdr("[1] 建立双控")
     if args.dry_run:
         print("  真机 = DryRunGripper（虚拟夹爪）—— 全流程与接真机一致，")
         print("         只是 CAN 那一层被换掉了。")
@@ -140,6 +203,7 @@ def main():
             render=render,
             mirror_first=not args.no_mirror_first,
             dry_run=args.dry_run,
+            calibration=cal_path,
         )
         dual.start()
         return dual
@@ -148,14 +212,24 @@ def main():
         dual = build(not args.no_render)
     except RuntimeError as exc:
         print(f"  [警告] {exc} → 改为无窗口运行")
-        dual = build(False)
+        try:
+            dual = build(False)
+        except CalibrationError as retry_exc:
+            print(f"\n{retry_exc}")
+            sys.exit(2)
+    except CalibrationError as exc:
+        # 标定没套上就绝不使能 —— start() 里已经断开并抛出来了
+        print(f"\n{exc}")
+        sys.exit(2)
 
     try:
         print(f"  {dual!r}")
+        if dual.calibration is not None:
+            print(f"  标定 = {dual.calibration.path}")
         print("  已使能，并已把仿真对齐到真机当前开度。")
         run(dual)
 
-        hdr("[7] 本次运行的开度偏差统计")
+        hdr("[8] 本次运行的开度偏差统计")
         cmp = dual.compare()
         print(f"  真机 {cmp['real_frac']:.4f}   仿真 {cmp['sim_frac']:.4f}"
               f"   Δ {cmp['delta']:+.4f}")

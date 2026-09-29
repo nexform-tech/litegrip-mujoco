@@ -10,6 +10,7 @@ src/litegrip_mujoco/
 ├── __init__.py          公开导出
 ├── constants.py         单位、行程基准、换算。刻意不 import SDK。
 ├── controller.py        θ 空间 PD + min-jerk / 线性斜坡
+├── calibration.py       标定的来源：发现、校验、套用并复核
 ├── gripper.py           MujocoGripper —— 与 LiteGrip 对等的门面
 ├── mirror.py            DualGripper、MirrorMode、跨设备 frac_open 换算
 ├── dryrun.py            DryRunGripper —— 符合 LiteGrip 形态的虚拟夹爪
@@ -56,6 +57,11 @@ SDK 那套 120 刻度应当**在真机侧消除，而不是在仿真侧补偿**�
 | 仿真 | `0.0` | `-1.14` | 1.14 |
 | 真机（已标定） | `1.775959` | `-0.064279` | 1.8402 |
 
+真机那一行是 **2026-09-24 那一次标定**的取值，作为参照冻结在这里。重新标定会同时改变
+这两个数，所以请把它当成示例，而不是"这台机器当前的端点"。`constants.REAL_POS_CLOSED_RAD`
+/ `REAL_POS_OPEN_RAD` 存的就是这一对，`--dry-run` 的虚拟夹爪也报这一对，好让它算 θ 的
+路径与真机同形 —— 除此之外没有别处读它们。
+
 同一个 `position_rad` 交给两台设备，落点完全不同。无量纲的
 `frac_open ∈ [0, 1]` 与标定无关，是唯一安全的交换量。`MirrorMode` 与
 `DualGripper` 交换的都是 `frac_open`，见 `mirror.py`。
@@ -73,6 +79,70 @@ SDK 那套 120 刻度应当**在真机侧消除，而不是在仿真侧补偿**�
 
 关系式为 `gap_mm = travel_mm + 1.548`。`get_position()` 报的是行程（0 = 闭合），
 `gap_mm()` 报的是绝对开口。
+
+## 标定的选择与来源
+
+真机运动前必须选定一份标定文件。这条规则归 `calibration.py` 管；`mirror.py` 与例程
+04/05 通过调用它来强制。
+
+### 两道闸
+
+设备要能动，两道闸必须同时过：
+
+| 闸 | 判据 | 不过时 |
+| --- | --- | --- |
+| 来源 | `is_simulated_device(d)` 或 `_provenance(d) is not None` | `UncalibratedDeviceError` |
+| 有效 | `_endpoints(d) is not None` —— 闭合端数值大于张开端 | `UncalibratedDeviceError` |
+
+第一道问的是"这些数从哪来"，第二道问的是"这些数讲不讲得通"。SDK 的出厂常量
+（`pos_closed_rad = 0.0`、`pos_open_rad = +1.14`）**类型对、次序反**，而这个反转正是
+"没标定过"的识别特征：只要 `pos_closed_rad <= pos_open_rad`，`_endpoints()` 就返回
+`None`。真实标定永远满足这个不变量。
+
+来源被记成一个冻结的 `Provenance(path, calibration, reason)`，存在
+`device._litegrip_mujoco_calibration` 上；对拒绝 `setattr` 的对象（`__slots__`）退到
+`WeakKeyDictionary`。`mark_calibrated(device, None, reason="…")` 是给"端点可信但没有文件"
+的设备留的口子 —— 理由会被记下来，于是豁免是**显式**的，review 时看得见。
+
+`require_usable_device()` 先过第一道闸，再走 `_check_device_still_holds()`：`config`
+与已套用的标定不一致时抛 `CalibrationVerificationError`。这后一步抓的是**跑着跑着丢掉
+标定**的设备，不只是从没标定过的。
+
+### 三层防线
+
+`apply_calibration(device, path)` 在三个地方设防，因为单独任何一层都不够：
+
+1. **在 SDK 拿到文件之前先校验。** 存在性、是普通文件、是 JSON 对象、三个必填键
+   （`zero_position_rad`、`max_position_rad`、`rad_to_mm`）、取值有限、`rad_to_mm > 0`、
+   `closed > open`，以及跨度不小于 `MIN_SPAN_RAD = 1e-3`。SDK 在"文件能解析但缺
+   `rad_to_mm`"时会抛出没被守卫的 `KeyError`；而 `closed == open` 的文件会在下游除零。
+2. **按 `realpath` 认身份拒绝出厂文件。** 按字符串比路径会被软链接和相对路径绕过，
+   按解析后的真实路径比就不会。
+3. **载入后把 `config` 端点与文件逐字段比对。** 这是承重的一层 —— 只有它抓得住 SDK 的
+   静默回落 —— 报错时同时给出"请求的端点"和"实际读到的端点"，那正是回落的特征。
+
+⚠ **绝对不要把 `apply_calibration()` 挪到 `enable()` 下面。** `enable()` 是第一个给电机
+上电的调用。SDK 文档给的顺序是 `connect() → load_calibration() → enable()`，
+`apply_calibration()` 就是中间那一步的替代品，两个例程都按这个顺序写。
+
+### `read_frac_open` 为什么默认严格
+
+毫米回落路径是用**缺失的那两个端点**定义的，所以它返回一个看起来像读数、实际不是读数的
+数。设备过不了任何一道闸时，`read_frac_open()` 与 `write_frac_open()` 抛
+`UncalibratedDeviceError`，而不是返回那个数。
+
+`read_frac_open(device, warn=True)` 作为废弃别名保留：它发一条 `DeprecationWarning`
+并隐含 `strict=False`。保留而不是删除，是因为删掉就破坏了调用方，而按本仓库的发布策略，
+破坏性变更意味着大版本 —— 这不该作为一次安全修复的副作用发生。用 `strict=False`
+可以直接拿到旧路径而不带警告。
+
+### `DryRunGripper` 的坑
+
+`DryRunGripper.load_calibration()` 与 `save_calibration()` 委托给 `self._inner`，所以
+`dry.config` 永远不会变，委托的返回值也说明不了外层对象的任何事。`DryRunGripper` 靠
+`IS_SIMULATED` 免除第一道闸，因此这里没有任何东西依赖那两个委托 —— 但**不要**读
+`dry.config` 来指望拿到刚载入文件的端点。这是本闸之前就有的问题，与它无关；记录在案，
+不在此处修。
 
 ## 为什么碰撞用 box 而不是网格
 
@@ -315,6 +385,10 @@ python -m pytest tests/ -v
   枚举和常量类对着已安装的 SDK 逐字段比对，`test_exception_family_is_the_sdk_family`
   检查 7 个异常名解析到的是 SDK 的**类对象**。这一层专门抓上游漂移：SDK 多一个
   字段、多一个错误码、多一个方法，它会响亮地失败，而不是让仿真悄悄缺一块。
+- **标定闸** —— `tests/test_calibration.py` 覆盖发现、校验、选择器、来源标记与两个严格
+  换算，对象是一个鸭子类型的 `LiteGrip` 替身，可以让它的 `load_calibration()` 复现 SDK
+  的静默回落。例程 04/05 另外以子进程方式跑，钉住命令行契约：`--list-calibrations`
+  退出码 0；非交互且不给 `--calibration` 时退出码 2 并打印指引。
 
 测试套件不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。需要 SDK 的用例在
 SDK 缺席时自行 skip。
