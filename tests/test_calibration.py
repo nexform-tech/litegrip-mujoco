@@ -521,6 +521,43 @@ class TestApply:
         with pytest.raises(cal.CalibrationFileError, match="出厂标定"):
             cal.apply_calibration(device, factory)
         assert device.calls == []
+        # 拒绝的理由里要说清楚怎么显式放行，否则调用方只能去读源码。
+        with pytest.raises(cal.CalibrationFileError, match="allow_factory=True"):
+            cal.apply_calibration(device, factory)
+        assert device.calls == []
+
+    def test_factory_path_is_accepted_when_explicitly_allowed(
+            self, tmp_path, monkeypatch):
+        """``allow_factory=True`` 是唯一的放行口，且放行后校验照旧。
+
+        放行的代价必须说清楚：第 2 层（按路径拒绝出厂标定）失效了，只剩第 3
+        层——「生效的端点确实是这份文件里的」。所以下面第二段仍然要抓得住静默
+        回退。
+        """
+        factory = write_cal(tmp_path, "factory_calibration.json",
+                            closed=0.052071, open_=-1.357481)
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: factory)
+
+        device = FakeReal(closed=0.052071, open_=-1.357481)
+        applied = cal.apply_calibration(device, factory, allow_factory=True)
+        assert applied.path == os.path.abspath(factory)
+        assert applied.pos_closed_rad == pytest.approx(0.052071)
+        assert cal.applied_calibration(device) == applied
+
+        # 放行不等于不校验：设备载入后给的是别的端点，第 3 层照样抓。
+        drifted = FakeReal(load_values=(1.775959, -0.064279))
+        with pytest.raises(cal.CalibrationVerificationError):
+            cal.apply_calibration(drifted, factory, allow_factory=True)
+        assert cal.applied_calibration(drifted) is None
+
+    def test_allow_factory_does_not_bypass_the_simulated_refusal(self, tmp_path):
+        """仿真设备与出厂标定是两条独立的拒绝理由，放行一条不该顺带放行另一条。"""
+        from litegrip_mujoco import DryRunGripper
+
+        path = write_cal(tmp_path, "c.json")
+        dry = DryRunGripper(realtime=False, noise=False)
+        with pytest.raises(cal.CalibrationFileError, match="仿真设备"):
+            cal.apply_calibration(dry, path, allow_factory=True)
 
     def test_false_return_is_a_failure(self, tmp_path):
         path = write_cal(tmp_path, "c.json")
@@ -555,6 +592,45 @@ class TestApply:
         with pytest.raises(cal.CalibrationFileError, match="仿真设备"):
             cal.apply_calibration(dry, path)
         assert cal.applied_calibration(dry) is None
+
+
+class TestRequireCalibration:
+    """``require_calibration`` 是库层的入口，也是 ``allow_factory`` 的转发点。"""
+
+    def test_applies_the_given_path(self, tmp_path):
+        path = write_cal(tmp_path, "c.json")
+        device = FakeReal()
+        applied = cal.require_calibration(device, path)
+        assert applied is not None
+        assert applied.path == os.path.abspath(path)
+        assert device.config.pos_closed_rad == pytest.approx(1.775959)
+
+    def test_allow_factory_reaches_apply_calibration(self, tmp_path, monkeypatch):
+        factory = write_cal(tmp_path, "factory_calibration.json",
+                            closed=0.052071, open_=-1.357481)
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: factory)
+
+        with pytest.raises(cal.CalibrationFileError, match="出厂标定"):
+            cal.require_calibration(FakeReal(), factory)
+
+        device = FakeReal(closed=0.052071, open_=-1.357481)
+        applied = cal.require_calibration(device, factory, allow_factory=True)
+        assert applied is not None
+        assert applied.pos_closed_rad == pytest.approx(0.052071)
+
+    def test_simulated_device_needs_nothing(self, tmp_path):
+        from litegrip_mujoco import DryRunGripper
+
+        dry = DryRunGripper(realtime=False, noise=False)
+        assert cal.require_calibration(dry) is None
+        assert cal.require_calibration(dry, write_cal(tmp_path, "c.json")) is None
+
+    def test_a_bad_path_fails_before_the_device_is_touched(self, tmp_path):
+        """文件有问题就不该等到连上 CAN 才报——连之前就把错的挡掉。"""
+        device = FakeReal()
+        with pytest.raises(cal.CalibrationError):
+            cal.require_calibration(device, str(tmp_path / "missing.json"))
+        assert device.calls == []
 
 
 class TestProvenance:
