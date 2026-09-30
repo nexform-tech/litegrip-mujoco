@@ -240,14 +240,18 @@ semantics — including the ones that surprise people. See **Known behaviour** b
 
 | Example | Direction | Hardware needed? |
 | --- | --- | --- |
-| [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | — (pure MuJoCo) | No |
+| [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | reads the state, moves nothing | No |
 | [`examples/02_move_sim.py`](examples/02_move_sim.py) | position, speed and force control | No |
-| [`examples/03_trajectory.py`](examples/03_trajectory.py) | record, save, load, replay | No |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | record, save, load, replay | Only to record or to replay onto it (`--dry-run`, `--play` run without) |
 | [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | gripper → simulation | `--dry-run`, else `--calibration` |
-| [`examples/05_dual_control.py`](examples/05_dual_control.py) | one command → both | `--dry-run`, else `--calibration` |
+| [`examples/05_dual_control.py`](examples/05_dual_control.py) | keyboard → gripper, mirrored in simulation | `--dry-run`, else `--calibration` |
 
-Examples 04 and 05 use the real gripper unless `--dry-run` is given, so they require a
+Examples 03, 04 and 05 drive the real gripper unless `--dry-run` is given, so they require a
 calibration file — see [Calibration](#calibration).
+
+Each example's CLI, its terminal sections and the safety checklist that has to come before a
+real gripper moves are documented in **[`examples/README.md`](examples/README.md)**
+([简体中文](examples/README.zh-CN.md)).
 
 ```bash
 # Run from the repository root, after `pip install -e ".[dev]"` — the examples
@@ -297,6 +301,21 @@ Simulation-only additions: `step()`, `settle()`, `reset()`, `release_fixture()`,
 `hold_fixture()`, `gap_mm()`, `frac_open()`, `set_frac_open()`, `launch_viewer()`,
 `sync_viewer()`, `model`, `data`, `model_path`.
 
+Loop and viewer additions, matching the shape of the PyBullet examples: `pump()`,
+`connected()`, `sim_time`, `command_fraction()`, `gui`, `keyboard_events()`,
+`mouse_events()` (always empty — the passive viewer delivers no mouse events), `status_text()`,
+`focus_camera()`.
+
+World queries: `box_slots()`, `add_box()`, `contacts()`, `link_aabb()`, `pad_aabbs()`,
+`grasp_center()`.
+
+Also exported for the examples: `pressed()`, `clicked()`, `held()`, `key_label()`,
+`key_codes()`, `KeyQueue`, `QUIT_KEYS`, `CONFIRM_KEYS`, `ZERO_GRAVITY_KEYS`,
+`TELEOP_KEYS` from `window`; `Trajectory`, `TrajectorySample`, `trajectory_dir()`,
+`resolve_path()` from `trajectory`, with the exceptions `TrajectoryError`,
+`TrajectoryBusyError`, `TrajectoryEmptyError`, `TrajectoryFormatError`,
+`TrajectoryNotActiveError` and `TrajectoryRecordingError`; `MujocoContact` from `world`.
+
 Also exported: `DualGripper`, `MirrorMode`, `DryRunGripper`, `read_frac_open()`,
 `write_frac_open()`, `constants`, `require_sdk()`, `HAS_SDK`.
 
@@ -318,9 +337,9 @@ What has been verified, and what has not:
 | Physical fidelity of the awkward parts | ✅ Verified | `TestForceSemantics` and `TestActuator` freeze the behaviours under *Known behaviour* as tests |
 | API parity with `LiteGrip` | ✅ Verified | `TestApiParity` holds a frozen member list; with the SDK installed it compares against the real class, which on 2026-09-28 reported `refresh_status` missing — PR #4 adds it |
 | Calibration guard | ✅ Verified | `tests/test_calibration.py`, 84 cases, against a stand-in whose `load_calibration()` reproduces the SDK's silent fallback |
-| Examples 01–03 | ✅ Verified | Each exits 0 with `--no-render`, with no hardware and no SDK |
-| Examples 04 and 05, `--dry-run` | ✅ Verified | Both exit 0; 05's closing comparison prints `Δ +0.0000` |
-| Example command-line contract | ✅ Verified | `--list-calibrations` exits 0; a non-interactive run with no `--calibration` exits 2 and prints the guidance |
+| Examples 01–03 | ✅ Verified | `01` and `02` exit 0 with `--headless`; `03` records, saves and replays headless (`--dry-run`), and replays a saved file (`--play`). No hardware, no SDK |
+| Examples 04 and 05, `--dry-run` | ✅ Verified | Both exit 0 headless; 04 mirrors a scripted stand-in, 05 walks its scripted targets and keeps the position between them |
+| Example command-line contract | ✅ Verified | `--list-calibrations` exits 0; a non-interactive run with no calibration to use exits 1 and prints the guidance. 2 is left to argparse's own usage errors |
 | Real-hardware motion | ⚠️ **Not verified** | No CAN hardware has been available. The real path is exercised only through `DryRunGripper`, which reports a 2026-09-24 calibration's θ endpoints; the SDK itself has never been driven from this package here |
 
 ## Known behaviour

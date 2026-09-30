@@ -226,13 +226,16 @@ SDK 的 `load_calibration(path)` 会构造 `sources = [path, _FACTORY_CALIB]`，
 
 | 例程 | 方向 | 需要硬件？ |
 | --- | --- | --- |
-| [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | ——（纯 MuJoCo） | 否 |
+| [`examples/01_hello_sim.py`](examples/01_hello_sim.py) | 只读状态，不运动 | 否 |
 | [`examples/02_move_sim.py`](examples/02_move_sim.py) | 位置 / 速度 / 力控 | 否 |
-| [`examples/03_trajectory.py`](examples/03_trajectory.py) | 录制、存盘、加载、回放 | 否 |
+| [`examples/03_trajectory.py`](examples/03_trajectory.py) | 录制、存盘、加载、回放 | 只有录制和放给真机时需要（`--dry-run`、`--play` 不要） |
 | [`examples/04_mirror_real.py`](examples/04_mirror_real.py) | 真机 → 仿真 | `--dry-run`，否则要 `--calibration` |
-| [`examples/05_dual_control.py`](examples/05_dual_control.py) | 一条指令 → 两边 | `--dry-run`，否则要 `--calibration` |
+| [`examples/05_dual_control.py`](examples/05_dual_control.py) | 键盘 → 真机，仿真同步显示 | `--dry-run`，否则要 `--calibration` |
 
-04 与 05 不给 `--dry-run` 时走的是真机，因此必须先给一份标定文件 —— 见[标定](#标定)。
+03、04、05 不给 `--dry-run` 时走的是真机，因此必须先给一份标定文件 —— 见[标定](#标定)。
+
+每个例程的命令行、终端分节，以及上真机之前必须走完的清单，都写在
+**[`examples/README.zh-CN.md`](examples/README.zh-CN.md)**（[English](examples/README.md)）。
 
 ```bash
 # 在仓库根目录跑，且先 `pip install -e ".[dev]"` —— 例程 import 的是
@@ -280,6 +283,21 @@ python3 examples/05_dual_control.py --dry-run
 `gap_mm()`、`frac_open()`、`set_frac_open()`、`launch_viewer()`、`sync_viewer()`、
 `model`、`data`、`model_path`。
 
+循环骨架与查看器层（与 PyBullet 例程同形）：`pump()`、`connected()`、`sim_time`、
+`command_fraction()`、`gui`、`keyboard_events()`、`mouse_events()`（恒为空表 —— 被动
+查看器不给鼠标事件）、`status_text()`、`focus_camera()`。
+
+世界查询：`box_slots()`、`add_box()`、`contacts()`、`link_aabb()`、`pad_aabbs()`、
+`grasp_center()`。
+
+为例程另导出：`window` 里的 `pressed()`、`clicked()`、`held()`、`key_label()`、
+`key_codes()`、`KeyQueue`、`QUIT_KEYS`、`CONFIRM_KEYS`、`ZERO_GRAVITY_KEYS`、
+`TELEOP_KEYS`；`trajectory` 里的 `Trajectory`、`TrajectorySample`、
+`trajectory_dir()`、`resolve_path()`，以及异常 `TrajectoryError`、
+`TrajectoryBusyError`、`TrajectoryEmptyError`、`TrajectoryFormatError`、
+`TrajectoryNotActiveError`、`TrajectoryRecordingError`；`world` 里的
+`MujocoContact`。
+
 另导出：`DualGripper`、`MirrorMode`、`DryRunGripper`、`read_frac_open()`、
 `write_frac_open()`、`constants`、`require_sdk()`、`HAS_SDK`。
 
@@ -301,9 +319,9 @@ python3 examples/05_dual_control.py --dry-run
 | 那些反直觉行为的物理保真 | ✅ 已验证 | `TestForceSemantics` 与 `TestActuator` 把「已知行为」逐条固化成测试 |
 | 与 `LiteGrip` 的 API 对等 | ✅ 已验证 | `TestApiParity` 持有一份冻结的成员清单；装了 SDK 时会对着真类比，2026-09-28 那次报出缺 `refresh_status` —— 由 PR #4 补上 |
 | 标定闸 | ✅ 已验证 | `tests/test_calibration.py`，84 个用例，对手是一个能让 `load_calibration()` 复现 SDK 静默回落的替身 |
-| 例程 01–03 | ✅ 已验证 | 各自带 `--no-render` 退出码 0，不需要硬件、不需要 SDK |
-| 例程 04 / 05 的 `--dry-run` | ✅ 已验证 | 两个都退出码 0；05 收尾的开度比对打印 `Δ +0.0000` |
-| 例程命令行契约 | ✅ 已验证 | `--list-calibrations` 退出码 0；非交互且不给 `--calibration` 时退出码 2 并打印指引 |
+| 例程 01–03 | ✅ 已验证 | 01、02 带 `--headless` 退出码 0；03 用 `--dry-run` 无头跑完录制、存盘、回放，用 `--play` 无头回放已存的文件。不需要硬件、不需要 SDK |
+| 例程 04 / 05 的 `--dry-run` | ✅ 已验证 | 两个无头都退出码 0；04 镜像一个脚本驱动的替身，05 走完脚本目标并在目标之间保持位置 |
+| 例程命令行契约 | ✅ 已验证 | `--list-calibrations` 退出码 0；非交互且没有可用标定时退出码 1 并打印指引。2 留给 argparse 自己的用法错误 |
 | 真机运动 | ⚠️ **未验证** | 手上没有 CAN 硬件。真机那条路径只经由 `DryRunGripper` 跑过，它报的是一份 2026-09-24 标定的 θ 端点；本包从未在这里驱动过 SDK 本身 |
 
 ## 已知行为
