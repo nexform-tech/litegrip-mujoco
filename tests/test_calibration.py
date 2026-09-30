@@ -669,6 +669,101 @@ class TestProvenance:
 # ══════════════════════════════════════════════════════════════════════════
 
 
+def fake_sdk(directory, name="litegrip"):
+    """造一个能骗过 ``sdk_factory_calibration_path`` 的假 ``litegrip`` 模块。
+
+    它只需要一个 ``gripper`` 子模块，子模块的 ``__file__`` 指到 ``directory``
+    下的 ``gripper.py``（真实的 SDK 就是这个布局：出厂标定与 ``gripper.py``
+    同目录）。不装真的 SDK、不碰 CAN。
+    """
+    import types
+
+    package = types.ModuleType(name)
+    package.__path__ = [str(directory)]
+    gripper = types.ModuleType(f"{name}.gripper")
+    gripper.__file__ = os.path.join(str(directory), "gripper.py")
+    package.gripper = gripper
+    return package
+
+
+class TestSdkProbe:
+    """``_litegrip`` 眼里的 SDK 是 ``sys.modules["litegrip"]``。
+
+    「第一次探测的结论」和「本进程真正的 litegrip」会不一样，而且必须让后者让路：
+    例程层的 ``import_litegrip()`` 按 ``$LITEGRIP_SDK_DIR`` / 同级检出定位目录再用
+    importlib 显式加载，不靠 ``sys.path`` —— 所以它常常在 ``_litegrip`` 第一次探测
+    **失败之后**才把 SDK 装进来。那次失败只说明「那会儿 ``sys.path`` 上没有」。
+    把它当终局的话，SDK 明明能用而 ``HAS_SDK`` 一直是 ``False``，于是出厂标定那条
+    「必须显式 ``allow_factory=True`` 才放行」的拒绝静默失效。
+    """
+
+    def test_adopts_an_sdk_loaded_after_a_failed_probe(self, tmp_path, monkeypatch):
+        from litegrip_mujoco import _litegrip as shim
+
+        sdk = fake_sdk(tmp_path)
+        monkeypatch.setattr(shim, "_sdk_module", None)
+        monkeypatch.setattr(shim, "_sdk_error", ImportError("当初没装"))
+        monkeypatch.setattr(shim, "HAS_SDK", False)
+        monkeypatch.setitem(sys.modules, "litegrip", sdk)
+
+        assert shim._probe() is sdk
+        assert shim.HAS_SDK is True
+        assert shim.sdk_unavailable_reason() is None
+        # 出厂标定的路径要跟着**这一份**解析 —— 这正是探测失败的代价
+        assert cal.sdk_factory_calibration_path() == os.path.join(
+            str(tmp_path), "factory_calibration.json")
+
+    def test_follows_the_sdk_that_replaced_the_old_one(self, tmp_path, monkeypatch):
+        """被换掉的那份不能再攥着：两边的 GripperState 会变成两个类。"""
+        from litegrip_mujoco import _litegrip as shim
+
+        old = fake_sdk(tmp_path / "old")
+        new = fake_sdk(tmp_path / "new")
+        monkeypatch.setattr(shim, "_sdk_module", old)
+        monkeypatch.setattr(shim, "_sdk_error", None)
+        monkeypatch.setattr(shim, "HAS_SDK", False)
+        monkeypatch.setitem(sys.modules, "litegrip", new)
+
+        assert shim._probe() is new
+        assert shim.load_litegrip() is new
+
+    def test_a_failed_probe_is_still_cached_and_still_fails(self, monkeypatch):
+        """没有 SDK 就是没有 —— 失败照旧缓存，不会每次调用都重试一遍 import。"""
+        from litegrip_mujoco import _litegrip as shim
+
+        monkeypatch.setattr(shim, "_sdk_module", None)
+        monkeypatch.setattr(shim, "_sdk_error", ImportError("没装"))
+        monkeypatch.delitem(sys.modules, "litegrip", raising=False)
+
+        assert shim._probe() is None
+        assert shim.sdk_unavailable_reason() is not None
+
+    def test_a_module_named_litegrip_is_taken_at_face_value(self, monkeypatch):
+        """判据只有「``sys.modules`` 里那一份」，没有额外的体检。
+
+        ``import litegrip`` 拿到什么就是什么——本来就是这条规则。加体检的话，
+        装了一半的 SDK 会在 ``import`` 成功的前提下被判成不可用，而调用方并没有
+        第二个判据可用。
+        """
+        import types
+
+        from litegrip_mujoco import _litegrip as shim
+
+        monkeypatch.setattr(shim, "_sdk_module", None)
+        monkeypatch.setattr(shim, "_sdk_error", ImportError("没装"))
+        monkeypatch.setattr(shim, "HAS_SDK", False)
+        stub = types.ModuleType("litegrip")
+        monkeypatch.setitem(sys.modules, "litegrip", stub)
+
+        assert shim._probe() is stub
+        assert shim.load_litegrip() is stub
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 换算函数：默认严格
+# ══════════════════════════════════════════════════════════════════════════
+
+
 class TestStrictConversions:
     def _bad_dry(self):
         """θ 端点不满足不变量的虚拟夹爪（SDK 默认值那副形状）。"""
