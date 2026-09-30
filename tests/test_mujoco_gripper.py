@@ -409,12 +409,12 @@ class TestActuator:
         assert model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
 
     def test_free_joint_does_not_confuse_joint_count(self, raw_scene):
-        """scene.xml 的工件带 freejoint，nv=8 但执行器只有 2 个。
+        """scene.xml 的工件和 4 个备用槽位都带 freejoint：nv=32，执行器只有 2 个。
 
-        按 nv 建控制器会把 8 个力矩往 2 个执行器里塞 —— 这是实际踩过的坑。
+        按 nv 建控制器会把 32 个力矩往 2 个执行器里塞 —— 这是实际踩过的坑。
         """
         model, _ = raw_scene
-        assert model.nv == 8
+        assert model.nv == 2 + 6 * 5, "两个指关节 + 工件与 4 个槽位各 6 自由度"
         assert model.nu == 2
 
         g = MujocoGripper(model_path="scene.xml", render=False)
@@ -1231,7 +1231,14 @@ class TestApiParity:
             return
         sim_only = {"step", "settle", "reset", "release_fixture", "hold_fixture",
                     "gap_mm", "frac_open", "set_frac_open", "launch_viewer",
-                    "sync_viewer", "model", "data", "model_path", "IS_SIMULATED"}
+                    "sync_viewer", "model", "data", "model_path", "IS_SIMULATED",
+                    # 循环骨架与窗口/输入层（pybullet 例程要的形状）
+                    "connected", "pump", "gui", "sim_time", "command_fraction",
+                    "keyboard_events", "mouse_events", "status_text",
+                    "focus_camera",
+                    # 世界查询与备用工件槽
+                    "box_slots", "add_box", "contacts", "link_aabb",
+                    "pad_aabbs", "grasp_center"}
         overlap = sim_only & {n for n in dir(cls) if not n.startswith("_")}
         assert not overlap, f"仿真独有成员与 SDK 撞名: {sorted(overlap)}"
 
