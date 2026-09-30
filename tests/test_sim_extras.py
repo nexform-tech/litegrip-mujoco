@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""仿真专有能力的测试：循环骨架、窗口/输入层、世界查询、备用工件槽。
+"""仿真专有能力的测试：循环骨架、窗口/输入层、世界查询、备用工件槽、轨迹。
 
-这些都不是 SDK 对等面上的东西，而是例程要用的仿真机制。分四组：
+这些都不是 SDK 对等面上的东西，而是例程要用的仿真机制。分五组：
 
   循环骨架     connected()/pump()/sim_time 在无窗口、无线程时也必须能问、能答，
                因为例程有 --headless 分支，测试也不该需要图形环境。
@@ -12,9 +12,13 @@
                下一条指令。
   世界与槽位   scene.xml 的 4 个槽位。模型是编译期的，"放一个工件"只能是搬运
                一个已有的，所以槽位用尽、被覆盖、被 reset 复位都要钉住。
+  轨迹         ``.lgt`` 的字节布局对着**字面量**钉住（不是对着本模块自己的
+               常量，那等于拿实现验实现）。装了 SDK 时还会真跑一遍互读；没装
+               就跳过，但不是不测——字面量那条永远跑。
 """
 from __future__ import annotations
 
+import struct
 import threading
 import time
 
@@ -29,9 +33,17 @@ from litegrip_mujoco import (
     KeyQueue,
     MujocoContact,
     MujocoGripper,
+    Trajectory,
+    TrajectoryBusyError,
+    TrajectoryNotActiveError,
+    TrajectoryRecordingError,
+    TrajectorySample,
     constants as C,
+    resolve_path,
+    trajectory_dir,
     world,
 )
+from litegrip_mujoco import trajectory as T
 from litegrip_mujoco import window as W
 from litegrip_mujoco.gripper import _resolve_model_path
 
@@ -508,3 +520,297 @@ class TestSpawnSlots:
         scene.settle(1.5)
         # 地板 z=-0.08，半高 0.01。
         assert float(scene.data.xpos[bid][2]) == pytest.approx(-0.07, abs=0.005)
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 轨迹：.lgt 格式与录制/回放
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _two_sample_trajectory():
+    return Trajectory(
+        samples=[
+            TrajectorySample(t=0.0, openness=1.0, position_rad=0.0),
+            TrajectorySample(t=1.0, openness=0.5, position_rad=-0.5,
+                             velocity_rad_s=0.1, torque_nm=0.2),
+        ],
+        sample_hz=100.0, created=1234.5, can_id=8,
+        pos_closed_rad=0.0, pos_open_rad=-1.14, rad_to_mm=74.958,
+        mount="reverse",
+    )
+
+
+#: ``.lgt`` 的字节布局，按格式说明**手写**成字面量。
+#:
+#: 刻意不复用本模块的 ``_HEADER``/``_SAMPLE``：那等于拿实现验实现，常量被改错
+#: 时两边一起错。这一份是给"跨实现互读"兜底的 —— 硬件的 SDK 写的文件必须能被
+#: 这里读出来，反之亦然，所以布局只能有一个定义，而它就是这个字面量。
+_EXPECTED_HEADER_SIZE = 66
+_EXPECTED_SAMPLE_SIZE = 40
+_EXPECTED_BYTES = (
+    struct.pack("<8sHI5dI8s", b"LGRTRJ01", 1, 2, 100.0, 1234.5, 0.0, -1.14,
+                74.958, 8, b"reverse\x00")
+    + struct.pack("<5d", 0.0, 1.0, 0.0, 0.0, 0.0)
+    + struct.pack("<5d", 1.0, 0.5, -0.5, 0.1, 0.2)
+)
+
+
+def _sdk_trajectory_module():
+    """装了 SDK 就返回它的 ``trajectory`` 模块，否则 None。"""
+    try:
+        import litegrip.trajectory as sdk  # type: ignore
+    except Exception:
+        return None
+    return sdk
+
+
+class TestLgtFormat:
+    def test_struct_sizes_and_magic(self):
+        """头部 66B、每拍 40B、magic 与版本号 —— 格式的三个硬数字。"""
+        assert T._HEADER.size == _EXPECTED_HEADER_SIZE
+        assert T._SAMPLE.size == _EXPECTED_SAMPLE_SIZE
+        assert T._MAGIC == b"LGRTRJ01"
+        assert T._VERSION == 1
+
+    def test_to_bytes_matches_the_hand_written_layout(self):
+        assert _two_sample_trajectory().to_bytes() == _EXPECTED_BYTES
+
+    def test_from_bytes_reads_the_hand_written_layout(self):
+        back = Trajectory.from_bytes(_EXPECTED_BYTES)
+        assert len(back) == 2
+        assert back.sample_hz == 100.0
+        assert back.can_id == 8
+        assert back.mount == "reverse"
+        assert back.samples[1] == TrajectorySample(
+            t=1.0, openness=0.5, position_rad=-0.5, velocity_rad_s=0.1,
+            torque_nm=0.2)
+        assert back.to_bytes() == _EXPECTED_BYTES, "读回来再写出去必须字节不变"
+
+    def test_a_truncated_file_is_refused(self):
+        """长度与头部声明的拍数不符 ⇒ 拒绝，而不是解析出半截轨迹。"""
+        with pytest.raises(T.TrajectoryFormatError, match="truncated|trailing"):
+            Trajectory.from_bytes(_EXPECTED_BYTES[:-1])
+        with pytest.raises(T.TrajectoryFormatError, match="truncated|trailing"):
+            Trajectory.from_bytes(_EXPECTED_BYTES + b"\x00" * 40)
+
+    def test_a_foreign_file_is_refused(self):
+        with pytest.raises(T.TrajectoryFormatError, match="magic"):
+            Trajectory.from_bytes(b"NOPE0001" + _EXPECTED_BYTES[8:])
+        with pytest.raises(T.TrajectoryFormatError, match="too short"):
+            Trajectory.from_bytes(b"LGRTRJ01")
+
+    def test_an_out_of_range_openness_is_refused(self):
+        """openness 必须在 [0, 1] —— 这条正是录制端要做 clamp 的原因。"""
+        bad = (_EXPECTED_BYTES[:_EXPECTED_HEADER_SIZE]
+               + struct.pack("<5d", 0.0, -3.7e-06, 0.0, 0.0, 0.0)
+               + struct.pack("<5d", 1.0, 0.5, -0.5, 0.1, 0.2))
+        with pytest.raises(T.TrajectoryFormatError, match="outside"):
+            Trajectory.from_bytes(bad)
+
+    def test_duration_is_the_span_not_the_end_stamp(self):
+        """首拍不在 t=0 的轨迹，时长仍是自己覆盖的那一段。"""
+        far = Trajectory(samples=[TrajectorySample(10.0, 1.0, 0.0),
+                                  TrajectorySample(12.0, 0.0, -1.14)],
+                         rad_to_mm=74.958, pos_open_rad=-1.14)
+        assert far.duration == pytest.approx(2.0)
+
+    def test_openness_at_interpolates_and_clamps(self):
+        traj = Trajectory(samples=[TrajectorySample(1.0, 0.0, 0.0),
+                                   TrajectorySample(3.0, 1.0, -1.14)])
+        assert traj.openness_at(0.0) == pytest.approx(0.0), "首拍之前夹住"
+        assert traj.openness_at(2.0) == pytest.approx(0.5)
+        assert traj.openness_at(99.0) == pytest.approx(1.0), "末拍之后夹住"
+
+    def test_bare_names_land_in_the_trajectory_dir(self, tmp_path,
+                                                   monkeypatch):
+        monkeypatch.setenv("LITEGRIP_TRAJ_DIR", str(tmp_path))
+        assert trajectory_dir() == str(tmp_path)
+        assert resolve_path("pick") == str(tmp_path / "pick.lgt")
+        assert resolve_path("pick.lgt") == str(tmp_path / "pick.lgt")
+        assert resolve_path("sub/pick.lgt") == "sub/pick.lgt"
+        assert resolve_path("/tmp/pick.lgt") == "/tmp/pick.lgt"
+
+    def test_save_and_load_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LITEGRIP_TRAJ_DIR", str(tmp_path))
+        written = _two_sample_trajectory().save("round_trip")
+        assert written == str(tmp_path / "round_trip.lgt")
+        back = Trajectory.load("round_trip")
+        assert back.samples == _two_sample_trajectory().samples
+        assert back.mount == "reverse"
+
+    def test_the_sdk_reads_our_bytes_and_we_read_its(self, tmp_path):
+        """跨实现互读。SDK 没装就跳过 —— 但**不是**不测：上面那几条字面量
+        用例永远跑，钉的就是这个布局。"""
+        sdk = _sdk_trajectory_module()
+        if sdk is None:
+            pytest.skip("litegrip SDK 未安装（布局已由字面量用例钉住）")
+
+        ours = _two_sample_trajectory().to_bytes()
+        theirs = sdk.Trajectory.from_bytes(ours)
+        assert len(theirs) == 2
+        assert theirs.mount == "reverse"
+        assert [s.openness for s in theirs.samples] == [1.0, 0.5]
+
+        # 反向：SDK 写、本模块读。SDK 的 Trajectory 与本地的是**两个类**，
+        # 靠的就是字节流这一层。
+        blob = theirs.to_bytes()
+        assert blob == ours, "SDK 重写一遍也必须字节相同"
+        assert Trajectory.from_bytes(blob).samples[1].torque_nm == pytest.approx(0.2)
+
+
+class TestTrajectorySession:
+    def test_recording_is_exclusive(self, sim):
+        sim.record_start(rate_hz=20.0, zero_gravity=False)
+        try:
+            with pytest.raises(TrajectoryBusyError):
+                sim.record_start(rate_hz=20.0, zero_gravity=False)
+        finally:
+            sim.record_stop(allow_empty=True)
+        assert sim.trajectory_status() == {"active": False, "kind": None}
+
+    def test_stop_without_start_raises(self, sim):
+        with pytest.raises(TrajectoryNotActiveError):
+            sim.record_stop()
+
+    def test_blocking_play_refuses_to_loop(self, sim):
+        with pytest.raises(ValueError, match="loop"):
+            sim.play(_two_sample_trajectory(), loop=True)
+
+    def test_an_empty_trajectory_cannot_be_played(self, sim):
+        with pytest.raises(T.TrajectoryEmptyError):
+            sim.play_start(Trajectory())
+
+    def test_status_keys_match_the_sdk(self, sim):
+        """状态字典的键名与 SDK 逐字一致 —— 日志解析不该关心是仿真还是真机。"""
+        sim.record_start(rate_hz=20.0, zero_gravity=False)
+        try:
+            assert set(sim.trajectory_status()) == {
+                "active", "kind", "samples", "rate_hz", "zero_gravity",
+                "loop_hz", "error"}
+        finally:
+            sim.record_stop(allow_empty=True)
+
+        traj = _two_sample_trajectory()
+        sim.play_start(traj, align=False)
+        try:
+            status = sim.trajectory_status()
+            assert set(status) == {
+                "active", "kind", "samples", "frames", "speed", "loop",
+                "completed", "openness", "loop_hz", "error"}
+            assert status["kind"] == "play"
+        finally:
+            sim.play_stop()
+
+    def test_a_stopped_clock_aborts_the_recorder(self, sim):
+        """时钟不前进 ⇒ 报错，而不是在停住的时钟上无限追加采样。"""
+        recorder = T.TrajectoryRecorder(sim, rate_hz=100.0, zero_gravity=False,
+                                        monotonic_fn=lambda: 0.0)
+        recorder.start()
+        try:
+            with pytest.raises(TrajectoryRecordingError, match="did not advance"):
+                recorder.wait_for(2, timeout=2.0)
+        finally:
+            recorder.stop()
+        assert recorder.sample_count == 1, "只该有 start() 那一拍参考样本"
+
+    def test_a_dead_loop_is_not_returned_as_a_whole_recording(self, sim):
+        recorder = T.TrajectoryRecorder(sim, rate_hz=100.0, zero_gravity=False,
+                                        monotonic_fn=lambda: 0.0)
+        recorder.start()
+        try:
+            recorder.wait_for(2, timeout=2.0)
+        except TrajectoryRecordingError:
+            pass
+        recorder.stop()
+        with pytest.raises(TrajectoryRecordingError):
+            recorder.result()
+
+    def test_record_then_replay_reproduces_the_move(self, sim):
+        """端到端：主线程驱动一遍移动，录下来，挪走，再放回去。
+
+        录制用 ``zero_gravity=False`` —— 仿真里手指推不动（查看器把鼠标留着
+        控制相机），所以录的必然是"另起一个线程驱动、本线程只读"这一路，也正是
+        SDK 为程序化录制准备的那一路。
+
+        终点用**录到的那一拍**去比，而不是比一个想象中的目标位：``play_stop()``
+        会就地保持（SDK 的 ``_hold_position()`` 也是就地保持），所以回放的物理
+        终点会比最后一帧的目标差一点点。实测 40 mm 处的移动差 0.06 mm。
+        """
+        target_mm = 40.0
+        assert sim.gap_mm() == pytest.approx(86.98, abs=0.1)
+
+        sim.record_start(rate_hz=50.0, zero_gravity=False, max_samples=80)
+        sim.goto(target_mm, duration=0.6)    # 阻塞到走完
+        traj = sim.record_stop()
+        sim.settle(0.2)
+        taught_gap = sim.gap_mm()
+
+        assert len(traj) > 10, "0.6s 的移动不该只录到个位数拍"
+        assert traj.samples[0].openness == pytest.approx(1.0, abs=1e-3)
+        assert traj.samples[-1].openness == pytest.approx(0.468, abs=0.01)
+        assert traj.mount == "normal", "仿真端点闭合位数值更大"
+        assert traj.rad_to_mm == pytest.approx(C.MM_SCALE / 1.14, rel=1e-6)
+        assert taught_gap == pytest.approx(C.GAP_CLOSED_MM + target_mm, abs=0.1)
+
+        # 挪回张开位再放，否则"回到教过的位置"这件事没有可观测的变化
+        sim.goto(C.MM_SCALE, duration=0.6)
+        assert sim.gap_mm() == pytest.approx(86.98, abs=0.5)
+
+        status = sim.play(traj, align=True)
+        assert status["completed"] is True
+        assert status["error"] is None
+        assert status["frames"] > 10
+        sim.settle(0.3)
+        assert sim.gap_mm() == pytest.approx(taught_gap, abs=0.3), (
+            "回放应当把夹爪带回教过的位置")
+        assert sim.trajectory_status() == {"active": False, "kind": None}
+
+    def test_openness_is_clamped_to_the_format_range(self, sim):
+        """两端的换算都夹在 [0, 1] —— 与 SDK 的 ``rad_to_openness`` 一致。
+
+        这条不是锦上添花：``from_bytes`` 只接受 ``[0, 1]``，而夹爪顶到限位时
+        PD 会轻微过冲（实测算出过 ``-3.7e-06``）。不夹的话录制端会写出自己的
+        读取端拒收的文件。
+        """
+        cfg = sim.config
+        assert T._frac_from_theta(C.POS_CLOSED_RAD, cfg) == pytest.approx(0.0)
+        assert T._frac_from_theta(C.POS_OPEN_RAD, cfg) == pytest.approx(1.0)
+
+        # "越过限位"的方向取决于端点的大小关系（反向安装会反过来），所以从
+        # 端点自己推，不写死符号。
+        outward = 1.0 if C.POS_CLOSED_RAD > C.POS_OPEN_RAD else -1.0
+        past_closed = C.POS_CLOSED_RAD + outward * 0.05
+        past_open = C.POS_OPEN_RAD - outward * 0.05
+        assert T._frac_from_theta(past_closed, cfg) == 0.0, "越过闭合位要夹到 0"
+        assert T._frac_from_theta(past_open, cfg) == 1.0, "越过张开位要夹到 1"
+
+        assert T._theta_from_frac(-1.0, cfg) == pytest.approx(C.POS_CLOSED_RAD)
+        assert T._theta_from_frac(2.0, cfg) == pytest.approx(C.POS_OPEN_RAD)
+
+    def test_a_recording_can_always_be_loaded_back(self, sim, tmp_path,
+                                                  monkeypatch):
+        """端到端：贴着两端录一遍，写出来的文件必须自己读得回来。"""
+        monkeypatch.setenv("LITEGRIP_TRAJ_DIR", str(tmp_path))
+        sim.record_start(rate_hz=100.0, zero_gravity=False, max_samples=80)
+        sim.close(duration=0.3)              # 快合拢，最容易过冲
+        traj = sim.record_stop()
+
+        assert all(0.0 <= s.openness <= 1.0 for s in traj.samples)
+        assert len(Trajectory.load(traj.save("clamped"))) == len(traj)
+
+    def test_disconnect_stops_a_running_replay(self, sim):
+        """回放在自己的线程里下指令，断开时必须连它一起收掉。
+
+        不收的话回放线程会在断开之后继续发帧、一路抛"未连接"直到自己停下 ——
+        那是一堆噪声，不是错误处理。
+        """
+        sim.play_start(_two_sample_trajectory(), align=False, loop=True)
+        player = sim._player
+        assert player is not None
+        assert _until(lambda: player.status()["frames"] > 0)
+
+        sim.disconnect()
+
+        assert _until(lambda: not player.is_playing)
+        assert player.status()["error"] is None, "断开该是一次干净的停止"
+        assert sim.trajectory_status() == {"active": False, "kind": None}

@@ -76,7 +76,7 @@ from .controller import (
     Ramp,
     TrajectoryRamp,
 )
-from . import world
+from . import trajectory, world
 from .window import (
     CONFIRM_KEYS,
     QUIT_KEYS,
@@ -341,6 +341,20 @@ class MujocoGripper:
 
         **注**：这不是 ``close()`` —— ``close()`` 是合拢夹爪。
         """
+        # 先收掉轨迹会话。回放线程在独立线程里往执行器下指令，不断掉的话它会
+        # 在断开之后继续发帧、一路抛 NotInitializedError 直到自己停下 —— 那是
+        # 一堆噪声，不是错误处理。
+        for session, setter in (
+            (self._recorder, "_recorder"),
+            (self._player, "_player"),
+        ):
+            if session is not None:
+                try:
+                    session.stop()
+                except Exception:
+                    pass
+                setattr(self, setter, None)
+
         self._running = False
         self._abort.set()
         # 先把查看器摘下来：仿真线程拿不到它，下一轮就不会再 sync()。
@@ -1373,6 +1387,199 @@ class MujocoGripper:
         with self._lock:
             return world.grasp_center(self._model, self._data)
 
+    # ══════════════════════════════════════════════════════════════════
+    # 轨迹录制与回放（与 SDK `litegrip.LiteGrip` 的轨迹接口同名）
+    # ══════════════════════════════════════════════════════════════════
+
+    def record_start(
+        self,
+        rate_hz: float = trajectory.DEFAULT_RATE_HZ,
+        zero_gravity: bool = True,
+        max_samples: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """开始后台录制，返回初始的 :meth:`trajectory_status`。
+
+        ``zero_gravity=True`` 时手指被松成自由可推 —— 真机上这是"手拖示教"。
+        **仿真里推不动**：``mujoco.viewer`` 把鼠标留着控制相机，不报拖拽事件，
+        所以仿真里的常规录法是 ``zero_gravity=False``，另起一个线程驱动夹爪，
+        本方法只**读**状态，不与驱动方抢控制权。
+
+        与真机 SDK 的两处差异，理由见 :mod:`litegrip_mujoco.trajectory`：
+
+        * 录制的采样循环**不**每拍补发零力矩帧 —— 真机那样做是为了躲开电机
+          的通信丢失自锁，仿真里没有总线也没有这个故障，零重力是一个状态位。
+        * **不**要求先加载标定 —— 仿真的 θ 端点来自 URDF（或 ``load_calibration()``
+          装进来的那份），本来就不是猜的。
+
+        Raises:
+            TrajectoryBusyError: 已经有录制或回放在跑。
+            NotInitializedError: 未连接或未使能。
+        """
+        self._check_connected()
+        self._check_enabled()
+        self._claim_trajectory("record", trajectory.TrajectoryBusyError)
+        recorder = trajectory.TrajectoryRecorder(
+            self, rate_hz=rate_hz, zero_gravity=zero_gravity,
+            max_samples=max_samples,
+        )
+        # 构造函数或 start() 抛异常时槽位还没被占（赋值在最后）—— 会话本来就
+        # 没开始，不需要回滚。
+        recorder.start()
+        self._recorder = recorder
+        return recorder.status()
+
+    def record_stop(self, allow_empty: bool = False) -> trajectory.Trajectory:
+        """停止录制并返回录到的那段轨迹。
+
+        Raises:
+            TrajectoryNotActiveError: 当前没有在录。
+            TrajectoryRecordingError: 采样循环死了 —— 半截的录制不会当成
+                完整的交回来。
+            TrajectoryEmptyError: 一拍都没采到。
+        """
+        recorder = self._recorder
+        if recorder is None:
+            raise trajectory.TrajectoryNotActiveError("没有正在进行的录制")
+        recorder.stop()
+        self._recorder = None
+        return recorder.result(allow_empty=allow_empty)
+
+    def record(
+        self,
+        duration_s: float,
+        rate_hz: float = trajectory.DEFAULT_RATE_HZ,
+        zero_gravity: bool = True,
+    ) -> trajectory.Trajectory:
+        """录 ``duration_s`` 秒并返回，**阻塞**。
+
+        默认 ``zero_gravity=True``（手拖示教）。仿真里手指推不动，所以这个
+        默认值等于"录一段松着的夹爪"；要录一段有动作的，用
+        ``zero_gravity=False`` 并从别的线程驱动夹爪，或者直接用
+        :meth:`record_start` / :meth:`record_stop` 自己控制起停。
+
+        Raises:
+            ValueError: ``duration_s <= 0``。
+            TrajectoryBusyError: 已经有别的会话在跑。
+            TrajectoryRecordingError: 没录满。
+        """
+        duration_s = float(duration_s)
+        if duration_s <= 0.0:
+            raise ValueError(f"duration_s 需 > 0 (给的是 {duration_s})")
+        target = max(1, int(round(duration_s * float(rate_hz))))
+
+        self.record_start(rate_hz=rate_hz, zero_gravity=zero_gravity,
+                          max_samples=target)
+        recorder = self._recorder
+        try:
+            recorder.wait_for(target, timeout=duration_s * 1.5 + 3.0)
+        except BaseException:
+            # 别让录制失败留下"手指松着、会话还被占着"的状态：先收尾，再把
+            # 异常放出去。
+            recorder.stop()
+            self._recorder = None
+            raise
+        return self.record_stop()
+
+    def play_start(
+        self,
+        trajectory_: trajectory.Trajectory,
+        speed: float = 1.0,
+        kp: Optional[float] = None,
+        kd: Optional[float] = None,
+        loop: bool = False,
+        align: bool = True,
+    ) -> Dict[str, Any]:
+        """后台回放一段轨迹，返回初始的 :meth:`trajectory_status`。
+
+        只回放**位置**：录到的力矩与速度是诊断量，不会作为前馈下发，所以一段
+        "夹着工件录的"轨迹回放出来是一条位置路径，**不是**同样的夹持力。要
+        可重复的夹持力，回放完再调 :meth:`grasp`。
+
+        参数名与 SDK 一致（``trajectory``）；这里加下划线是因为同名模块
+        ``trajectory`` 在方法体内要用到。
+
+        Raises:
+            TrajectoryBusyError: 已经有别的会话在跑。
+            TrajectoryEmptyError: 轨迹里没有采样点。
+            ValueError: ``speed <= 0``。
+            NotInitializedError: 未连接或未使能。
+        """
+        self._check_connected()
+        self._check_enabled()
+        self._claim_trajectory("play", trajectory.TrajectoryBusyError)
+        player = trajectory.TrajectoryPlayer(
+            self, trajectory_, speed=speed, kp=kp, kd=kd, loop=loop,
+            align=align,
+        )
+        # 同 record_start()：槽位在最后才占，构造/start() 抛异常时无需回滚。
+        player.start()
+        self._player = player
+        return player.status()
+
+    def play(
+        self,
+        trajectory_: trajectory.Trajectory,
+        speed: float = 1.0,
+        kp: Optional[float] = None,
+        kd: Optional[float] = None,
+        loop: bool = False,
+        align: bool = True,
+    ) -> Dict[str, Any]:
+        """回放一次并**阻塞**到结束，返回最终状态。
+
+        Raises:
+            ValueError: ``loop`` 为真。
+            TrajectoryError: 回放提前停了 —— 时钟停住，或者窗口被关掉。
+        """
+        if loop:
+            raise ValueError(
+                "loop=True 的阻塞回放永远不会返回；要循环播放用 "
+                "play_start(loop=True)，再用 play_stop() 停"
+            )
+        self.play_start(trajectory_, speed=speed, kp=kp, kd=kd, loop=False,
+                        align=align)
+        player = self._player
+        # 墙钟节拍 + 一次 align 移动，余量留给慢的第一帧。自带的兜底期限，
+        # 停住的时钟不能把调用方挂在这里。
+        budget = abs(float(trajectory_.duration)) / float(speed) * 1.5 + 4.0
+        try:
+            finished = player.wait(budget)
+        except BaseException:
+            # 长回放里 Ctrl+C 是最常见的退出方式。不 stop 的话回放线程还在
+            # 下指令、会话还占着，之后每次 record/play 都会被判成 busy。
+            self.play_stop()
+            raise
+        status = self.play_stop()
+        if not finished:
+            raise trajectory.TrajectoryError(
+                f"回放未在 {budget:.1f}s 内结束 (已发 {status.get('frames', 0)} 帧) "
+                f"—— 采样时钟可能停住了"
+            )
+        if status.get("error") is not None:
+            raise trajectory.TrajectoryError(f"回放中止: {status['error']}")
+        return status
+
+    def play_stop(self, timeout: float = 2.0) -> Dict[str, Any]:
+        """停止回放，把手指留在最后一个目标位置。"""
+        player = self._player
+        if player is None:
+            return {"active": False, "kind": None}
+        player.stop(timeout=timeout)
+        self._player = None
+        return player.status()
+
+    def trajectory_status(self) -> Dict[str, Any]:
+        """当前录制或回放的快照；没有在跑时返回 ``{"active": False, "kind": None}``。
+
+        一个方法管两个方向：``kind`` 说明是哪个（``"record"`` / ``"play"``），
+        而且两者同时只会有一个在跑。键名与 SDK 逐字一致。
+        """
+        if self._recorder is not None:
+            return self._recorder.status()
+        if self._player is not None:
+            return self._player.status()
+        return {"active": False, "kind": None}
+
     def launch_viewer(self) -> None:
         """打开被动查看器（等价于构造时 ``render=True``）。"""
         self._open_viewer()
@@ -1632,6 +1839,18 @@ class MujocoGripper:
     def _check_enabled(self) -> None:
         if not self._enabled:
             raise NotInitializedError("未使能 — 请先调用 enable()")
+
+    def _claim_trajectory(self, kind: str, exc: Any) -> None:
+        """占用轨迹会话；已经被占用时抛 ``exc``。
+
+        录制与回放互斥，与 SDK 的 ``_claim_session`` 同义。互斥是必要的：两个
+        会话同时往同一组执行器下指令，谁都不知道对方在，最后写进去的那个才
+        算数。
+        """
+        started = "录制" if kind == "record" else "回放"
+        if self._recorder is not None or self._player is not None:
+            running = self.trajectory_status().get("kind")
+            raise exc(f"已经有一个轨迹会话在跑（{running}），不能再开始{started}")
 
     def _check_alive(self) -> None:
         """确认后台物理线程还活着。
