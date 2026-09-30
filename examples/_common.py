@@ -466,7 +466,25 @@ def factory_calibration_path() -> Path | None:
     from litegrip_mujoco import sdk_factory_calibration_path
 
     found = sdk_factory_calibration_path()
-    return None if found is None else Path(found)
+    if found is not None:
+        return Path(found)
+
+    # 库层的探测只在 ``sys.modules`` / ``sys.path`` 上看 ``litegrip``；而 SDK 完全
+    # 可能只存在于 ``$LITEGRIP_SDK_DIR`` 或同级检出里——那条路径要等到
+    # :func:`import_litegrip` 显式加载才会被看见，而那一步在选标定**之后**。这里
+    # 直接按目录找文件，**不导入 SDK**：导入会连带拉起 SocketCAN 依赖，而这一步
+    # 只想知道一个文件在哪。
+    #
+    # 找错的风险说清楚：SDK 若把出厂标定挪到别处（它声明的 ``_FACTORY_CALIB``），
+    # 这里就会漏掉，于是退回「列出候选让人选」——非交互环境里直接失败，是响的，
+    # 不是错的。反过来找**对**了而库层不认识它（同一份文件、两条路径），库层的
+    # 拒绝会照常触发，也是一条明确的报错。
+    directory = sdk_dir()
+    if directory is not None:
+        candidate = directory / "litegrip" / "factory_calibration.json"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def choose_calibration_file(requested=None, *, factory=None, ask=None, out=print):
@@ -831,13 +849,17 @@ def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S):
 
 def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
                       noise: bool = True):
-    """连接真机夹爪：选标定 → connect → 载入并核实标定 → enable。
+    """连接真机夹爪：导入 SDK → 选标定 → connect → 载入并核实标定 → enable。
 
     标定在**连接之前**就定下来（:func:`choose_calibration_file`）：``--calib``
     给的优先，没给就用 SDK 包里那份出厂标定，出厂文件也读不出来才在终端里选。
     载入走库层的 :func:`~litegrip_mujoco.apply_calibration`，它会逐个字段核实
     「生效的确实是这一份」——SDK 在文件读不出来时会**静默**改用出厂标定并照样返回
     ``True``，光看返回值不够。
+
+    ``--dry-run`` **不导入 SDK**：它不碰 CAN，而 ``import litegrip`` 在没装
+    SocketCAN 依赖的机器上会失败。它也因此不依赖任何标定——替身的刻度是它自己
+    带的，`--calib` 在这里只用来显示摘要，一份都找不到就跳过这一步，不退出。
 
     任一步失败都打印可读的原因并 ``SystemExit(1)``，不会抛裸异常。
 
@@ -863,17 +885,30 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
     if args.list_calibrations:
         raise SystemExit(list_calibrations())
 
-    calib_path, is_factory = choose_calibration_file(
-        args.calib, factory=factory_calibration_path())
-    calibration = read_calibration_file(calib_path)
-    notes = check_calibration_matches_args(
-        calibration, channel=args.channel, can_id=args.can_id,
-        mst_id=args.mst_id)
-    print(f"   [真机] 标定 {calib_path}"
-          + ("（SDK 出厂标定）" if is_factory else ""))
-    print(f"          {calibration_summary(calibration.raw)}")
-    for note in notes:
-        print(note)
+    try:
+        calib_path, is_factory = choose_calibration_file(
+            args.calib, factory=factory_calibration_path())
+    except SystemExit:
+        if not dry_run:
+            raise
+        # --dry-run 没碰 CAN，也就不依赖任何标定：替身的刻度是它自己带的
+        # （真机口径的 θ 端点）。这里只放弃「显示这份文件」这一步，不放弃整场演示。
+        print("   [真机] --dry-run：没有显示标定文件（没给 --calib，"
+              "也没找到 SDK 出厂标定）")
+        print("          替身不受影响：它的刻度是自己的，不读标定文件。"
+              "要让这里显示某一份，用 --calib <路径>")
+        calib_path, is_factory = None, False
+
+    if calib_path is not None:
+        calibration = read_calibration_file(calib_path)
+        notes = check_calibration_matches_args(
+            calibration, channel=args.channel, can_id=args.can_id,
+            mst_id=args.mst_id)
+        print(f"   [真机] 标定 {calib_path}"
+              + ("（SDK 出厂标定）" if is_factory else ""))
+        print(f"          {calibration_summary(calibration.raw)}")
+        for note in notes:
+            print(note)
 
     if dry_run:
         print("   [真机] DryRunGripper（--dry-run：不碰 CAN，内部是一台独立仿真；")

@@ -665,7 +665,7 @@ class TestProvenance:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 换算函数：默认严格
+# SDK 探测：认 sys.modules，不认第一次的结论
 # ══════════════════════════════════════════════════════════════════════════
 
 
@@ -1069,19 +1069,27 @@ class TestMirrorModeGuard:
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def run_example(name, *args, home):
+def run_example(name, *args, home, env=None):
     """在子进程里跑一个例程。
 
     用 ``LITEGRIP_CALIB`` 而不是 ``HOME`` 来搬走"默认标定路径"：改 ``HOME``
     会连带把解释器的 user site-packages 也搬走，numpy 就 import 不到了。
     ``LITEGRIP_CALIB`` 本来就是 SDK 用来改默认路径的开关，语义正好。
+
+    ``env`` 里的键覆盖上面这层默认值——用来把 ``LITEGRIP_SDK_DIR`` 指到一个
+    空目录或一份自造的 SDK 上，这样用例不必依赖这台机器装没装 SDK。
     """
-    env = dict(os.environ)
-    env["LITEGRIP_CALIB"] = str(home / "litegrip_calibration.json")
+    environment = dict(os.environ)
+    environment["LITEGRIP_CALIB"] = str(home / "litegrip_calibration.json")
+    for key, value in (env or {}).items():
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = str(value)
     return subprocess.run(
         [sys.executable, os.path.join(EXAMPLES, name), *args],
         cwd=REPO_ROOT,
-        env=env,
+        env=environment,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -1089,12 +1097,44 @@ def run_example(name, *args, home):
     )
 
 
+def no_sdk(tmp_path):
+    """一个指向空目录的 ``LITEGRIP_SDK_DIR``：既没有 SDK，也没有出厂标定。
+
+    出厂标定就在 SDK 包里，所以「找不到 SDK」和「找不到出厂标定」是同一件事。
+    把这一档固定下来，用例就不会因为跑测试的机器上恰好有一份 SDK 检出而改变结论。
+    """
+    empty = tmp_path / "no-sdk"
+    empty.mkdir(exist_ok=True)
+    return {"LITEGRIP_SDK_DIR": empty}
+
+
+def fake_sdk_dir(tmp_path, **fields):
+    """造一份最小可用的 SDK 检出：只有 ``litegrip/factory_calibration.json``。
+
+    例程不导入它——``--dry-run`` 不碰 CAN，只要出厂标定文件在那个位置。非
+    ``--dry-run`` 会去 ``litegrip/__init__.py``，这里没有，于是照实报「找不到
+    SDK」。
+    """
+    directory = tmp_path / "sdk"
+    package = directory / "litegrip"
+    package.mkdir(parents=True, exist_ok=True)
+    data = {"zero_position_rad": 0.052071, "max_position_rad": -1.357481,
+            "rad_to_mm": 61.01229326764816}
+    data.update(fields)
+    (package / "factory_calibration.json").write_text(json.dumps(data))
+    return directory
+
+
 class TestExamples:
     @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
     def test_refuses_to_start_without_a_tty(self, tmp_path, name):
-        """非交互终端 + 没给 --calibration ⇒ 退出码 2，且说清怎么修。"""
-        result = run_example(name, home=tmp_path)
-        assert result.returncode == 2, result.stdout + result.stderr
+        """非交互终端 + 没有可选标定 ⇒ 退出码 1，且说清怎么修。
+
+        退出码 1（``SystemExit(message)``）而不是 2：2 留给 argparse 自己的用法
+        错误。两份真机样例与 pybullet 那套用的是同一条约定。
+        """
+        result = run_example(name, home=tmp_path, env=no_sdk(tmp_path))
+        assert result.returncode == 1, result.stdout + result.stderr
         combined = result.stdout + result.stderr
         assert "--calibration" in combined
         assert "标定" in combined
@@ -1108,19 +1148,44 @@ class TestExamples:
 
     @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
     def test_dry_run_does_not_ask_for_calibration(self, tmp_path, name):
-        """--dry-run 不接触真机，因此不弹选择器，也不该因为缺标定而退出。"""
+        """--dry-run 不接触真机：缺标定也照跑，且**不**弹选择器。
+
+        必须给 ``--duration``：这两个例程是常驻的镜像/遥操作循环，跑到 Esc 或
+        关窗口为止。
+        """
         home = tmp_path / "home"
         home.mkdir()
-        result = run_example(name, "--dry-run", "--no-render", home=home)
+        result = run_example(name, "--dry-run", "--no-render",
+                             "--duration", "2.5",
+                             home=home, env=no_sdk(tmp_path))
         assert result.returncode == 0, result.stdout + result.stderr
-        assert "跳过标定选择" in result.stdout
+        assert "选择标定文件" not in result.stdout + result.stderr
+        assert "没找到 SDK 出厂标定" in result.stdout
+
+    @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
+    def test_falls_back_to_the_sdk_factory_calibration(self, tmp_path, name):
+        """没给 --calib 时用 SDK 包里那份出厂标定，并说明它不是这台夹爪的。
+
+        这是照搬 pybullet 的回落顺序（``--calib`` → 出厂标定 → 交互选择）里的
+        第 2 档。它必须**先于** SDK 导入就能定下来：SDK 未必装在 ``sys.path``
+        上，而这一档的默认行为就是走它。
+        """
+        sdk = fake_sdk_dir(tmp_path)
+        result = run_example(name, "--dry-run", "--no-render",
+                             "--duration", "2.5",
+                             home=tmp_path / "home",
+                             env={"LITEGRIP_SDK_DIR": sdk})
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert str(sdk / "litegrip" / "factory_calibration.json") in result.stdout
+        assert "SDK 出厂标定" in result.stdout
+        assert "不是这台夹爪自己量的" in result.stdout
 
     @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
     def test_explicit_calibration_is_reported(self, tmp_path, name):
-        """给了 --calibration 就走到底（这里会停在缺 SDK 那一步）。"""
+        """指错文件要当场报「读不出来」，而不是先抱怨没装 SDK。"""
         result = run_example(name, "--calibration", str(tmp_path / "nope.json"),
                              home=tmp_path)
-        assert result.returncode == 2
+        assert result.returncode == 1, result.stdout + result.stderr
         assert "nope.json" in result.stdout + result.stderr
 
     def test_list_calibrations_finds_a_planted_file(self, tmp_path):
