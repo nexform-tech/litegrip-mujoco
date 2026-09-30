@@ -52,6 +52,18 @@ from .calibration import (
 from .dryrun import DryRunGripper
 from .gripper import DEFAULT_MODEL, SCENE_MODEL, MujocoGripper
 from .mirror import DualGripper, MirrorMode, read_frac_open, write_frac_open
+from .window import (
+    CONFIRM_KEYS,
+    QUIT_KEYS,
+    TELEOP_KEYS,
+    ZERO_GRAVITY_KEYS,
+    KeyQueue,
+    clicked,
+    held,
+    key_codes,
+    key_label,
+    pressed,
+)
 
 try:  # pragma: no cover - 取决于安装方式
     from importlib.metadata import PackageNotFoundError, version as _pkg_version
@@ -120,6 +132,17 @@ __all__ = [
     "select_calibration_for",
     # 无硬件
     "DryRunGripper",
+    # 窗口与键盘输入（例程的循环骨架用）
+    "KeyQueue",
+    "CONFIRM_KEYS",
+    "QUIT_KEYS",
+    "TELEOP_KEYS",
+    "ZERO_GRAVITY_KEYS",
+    "clicked",
+    "held",
+    "key_codes",
+    "key_label",
+    "pressed",
     # 常量与工具
     "constants",
     "DEFAULT_MODEL",

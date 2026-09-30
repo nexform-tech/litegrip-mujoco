@@ -49,10 +49,11 @@ DM 电机上报的是它自己的力矩估计，堵转/受力时与指令一致�
 """
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 import time
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -67,7 +68,25 @@ from ._litegrip import (
     GripperStatus,
     NotInitializedError,
 )
-from .controller import GripperPDController, Hold, LinearRamp, MinJerkRamp, Ramp
+from .controller import (
+    GripperPDController,
+    Hold,
+    LinearRamp,
+    MinJerkRamp,
+    Ramp,
+    TrajectoryRamp,
+)
+from .window import (
+    CONFIRM_KEYS,
+    QUIT_KEYS,
+    ZERO_GRAVITY_KEYS,
+    KeyQueue,
+    clicked,
+    held,
+    key_codes,
+    key_label,
+    pressed,
+)
 
 #: 默认模型：纯夹爪（2 自由度、无外部物体），适合做单位与动力学基准。
 DEFAULT_MODEL = "litegrip.xml"
@@ -111,6 +130,20 @@ def _resolve_model_path(model_path: Optional[str]) -> str:
         f"找不到 MuJoCo 模型 {model_path!r}；试过：{candidates}。"
         f"assets 目录：{assets}"
     )
+
+
+def _accepts_key_callback(launch: Any) -> bool:
+    """``launch_passive`` 收不收 ``key_callback``（MuJoCo ≥ 3.1 才收）。
+
+    用签名判断，而不是"调用失败就退回两参数版"。后者看着更简单，但
+    ``TypeError`` 也可能来自 ``launch_passive`` **内部** —— 那时窗口已经建好
+    了，重试会在屏幕上多留一个没人 sync 的孤儿窗口。查签名不会产生这个后果。
+    """
+    try:
+        params = inspect.signature(launch).parameters
+    except (TypeError, ValueError):
+        return False
+    return "key_callback" in params
 
 
 class MujocoGripper:
@@ -209,11 +242,24 @@ class MujocoGripper:
         self._viewer: Any = None
         self._abort = threading.Event()
 
+        # 按键台账。必须在 _open_viewer() 之前建好：launch_passive() 之后
+        # key_callback 随时可能被查看器自己的线程调用。
+        self._keys = KeyQueue()
+
+        # 仿真时钟 (s)，在 _tick 里按 dt 累加。与墙钟无关 —— realtime=False 时
+        # 两者会差很远，而 settle()/录制要的是**仿真**时间。
+        self._sim_time = 0.0
+
         self._connected = False
         self._enabled = False
         self._status_flags = GripperStatus.NONE
         self._error_code = 0
         self._zero_gravity = False
+
+        # 轨迹录制/回放。惰性建，因为大多数会话用不到。
+        self._recorder: Any = None
+        self._player: Any = None
+        self._play_ramp: Optional[TrajectoryRamp] = None
 
         # 温度模型：不是标定值，只是让 get_temperature() 有意义的示意模型。
         self._temp_mos = float(_AMBIENT_C)
@@ -346,6 +392,9 @@ class MujocoGripper:
         with self._lock:
             self._ramp = None
             self._ctrl.reset()
+            # 顺带解掉 command_fraction 可能压上去的限幅。急停之后再运动应当是
+            # 正常出力，而不是继承上一次的力上限。
+            self._ctrl.set_torque_limit(None)
             self._data.ctrl[:] = 0.0
         self._status_flags &= ~GripperStatus.MOVING
         return True
@@ -872,6 +921,76 @@ class MujocoGripper:
     # 仿真专有
     # ══════════════════════════════════════════════════════════════════
 
+    def connected(self) -> bool:
+        """后台仿真线程是否在跑。
+
+        与 :attr:`is_connected` 的区别：那个是 SDK 对等面上的"逻辑连接"标志，
+        ``connect()`` 一置到位就为 True；这个还额外要求线程真的活着。窗口被关
+        掉之后线程会自己退出，于是 ``connected()`` 变 False，而 ``is_connected``
+        仍是 True 直到 :meth:`disconnect`。
+
+        循环该不该继续，看这个。
+        """
+        return bool(self._connected and self._running)
+
+    @property
+    def gui(self) -> bool:
+        """当前有没有窗口（构造时 ``render=True`` 或调过 :meth:`launch_viewer`）。"""
+        return self._viewer is not None
+
+    @property
+    def sim_time(self) -> float:
+        """累计仿真时间 (s)，从构造起算。
+
+        与 :meth:`data` 里的 ``time`` 不同：那个会被 :meth:`reset` 用关键帧
+        清零，这个只增不减。录制轨迹、量"跑了多久"都用它 —— 一个会被复位打断
+        的时钟做不了这两件事。
+
+        ``realtime=False`` 时它会跑在墙钟前面，所以别拿它当秒表。
+        """
+        return float(self._sim_time)
+
+    def pump(self) -> bool:
+        """推进一拍并刷新画面，返回**循环该不该继续**。放进 ``while`` 条件里。
+
+            while gripper.pump():
+                ...            # 读按键、打印状态
+
+        ``False`` 的两种情形：窗口被关掉了，或者有人调了 :meth:`stop`（中止标志
+        置位）。两种都意味着"该收尾了"，所以调用方不需要分辨。
+
+        **不会重复推进物理**：仿真线程在跑时它只等，没跑时才自己走一步。所以
+        有窗口、有线程的常规跑法下，物理由线程按 ``realtime`` 的节拍推，主循环
+        只管刷新和响应输入。
+        """
+        if self._abort.is_set():
+            return False
+        viewer = self._viewer
+        if viewer is not None:
+            try:
+                if not viewer.is_running():
+                    return False
+            except Exception:
+                return False
+
+        if self._connected:
+            # 物理线程在推。这里只等它一拍 —— 自己再 mj_step 一次就是两个线程
+            # 同时碰 mjData（见 _open_viewer 的 docstring）。
+            time.sleep(_POLL_S)
+            return True
+
+        with self._lock:
+            self._tick(float(self._model.opt.timestep))
+            if viewer is not None:
+                # 没有线程就没人 sync，画面会冻在最后一帧。补上。
+                try:
+                    viewer.sync()
+                except Exception:
+                    return False
+        if self._realtime:
+            time.sleep(float(self._model.opt.timestep))
+        return True
+
     def step(self, n: int = 1) -> None:
         """手动推 n 个物理步（仅在未 connect()、即线程没跑时用）。"""
         if self._connected:
@@ -880,9 +999,227 @@ class MujocoGripper:
             for _ in range(n):
                 self._tick(self._model.opt.timestep)
 
-    def settle(self, seconds: float) -> None:
-        """放仿真自己跑 ``seconds`` 仿真秒，不改变控制目标。"""
-        self._sleep(seconds)
+    def settle(
+        self,
+        seconds: Optional[float] = None,
+        *,
+        tolerance_rad: float = C.DEFAULT_SETTLE_TOLERANCE_RAD,
+        stall_rad_s: float = C.DEFAULT_SETTLE_STALL_RAD_S,
+        stall_s: float = C.DEFAULT_SETTLE_STALL_S,
+    ) -> Tuple[float, bool]:
+        """放仿真自己跑。不改变控制目标 —— 要它走向哪儿先设好目标。
+
+        两种用法，差别只在**什么时候停**：
+
+        ``settle(0.5)``
+            跑满 0.5 秒。哪怕指爪第 1 ms 就已经到位也照跑不误 —— 这段时间
+            是留给**别的东西**的：工件下落、夹具松开后靠摩擦挂住、温度模型
+            爬升。旧版就是这个语义（那时只是单纯睡一觉），保持不变。
+
+        ``settle()``
+            不带参数：跑到指爪**停下来**为止，最长
+            :data:`constants.DEFAULT_SETTLE_TIMEOUT_S`。这里"停下来"有两种
+            结局，返回值把它们分开。
+
+        Args:
+            seconds: 跑多久（**墙钟**秒）。不给则用"等到停住"模式。
+            tolerance_rad: 目标角误差小于它就算"到位"。
+            stall_rad_s: 角速度小于它就算"停住了"。
+            stall_s: 连续停住这么久（**仿真**秒）才认定是停住，避免把
+                起步瞬间的零速度误判成堵转。
+
+        Returns:
+            ``(elapsed_s, reached)``：实际走过的**仿真**秒数，以及结束时目标角
+            误差是否在 ``tolerance_rad`` 以内。
+
+            不带参数时 ``reached`` 才是重点：``False`` 且 ``elapsed_s`` 远小于
+            超时 = **撞上工件停在半路**（夹住了东西）；``False`` 且 ``elapsed_s``
+            贴着超时 = 一直没停到位（任务没完成）。带参数时它只是"跑完之后到没
+            到位"的一次快照。
+
+        Note:
+            返回值是**新增**的 —— 旧版返回 ``None``。仓内所有调用点都忽略返回值，
+            所以这处改动向后兼容；但它是公开签名的一部分，写进 PR 说明。
+        """
+        dt = float(self._model.opt.timestep)
+        t0 = float(self._sim_time)
+
+        if seconds is None:
+            deadline = time.monotonic() + C.DEFAULT_SETTLE_TIMEOUT_S
+            prev_t = t0
+            stalled = 0.0
+            while True:
+                self._advance_settle(dt)
+                if self._at_target(tolerance_rad):
+                    return (float(self._sim_time) - t0, True)
+
+                now_t = float(self._sim_time)
+                if abs(self._dtheta()) <= stall_rad_s:
+                    stalled += now_t - prev_t
+                    if stalled >= stall_s:
+                        break
+                else:
+                    stalled = 0.0
+                prev_t = now_t
+
+                if self._abort.is_set() or time.monotonic() >= deadline:
+                    break
+            return (float(self._sim_time) - t0, False)
+
+        end = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < end:
+            self._advance_settle(dt)
+            if self._abort.is_set():
+                break
+        return (float(self._sim_time) - t0, self._at_target(tolerance_rad))
+
+    def _at_target(self, tolerance_rad: float) -> bool:
+        """到位判定 = **斜坡走完** 且 目标角误差在容差内。
+
+        "误差在容差内"这一条单独用是不够的：沿着斜坡匀速走的时候，目标每步只
+        挪一丁点，PD 跟得又紧，位置误差会一直贴着零 —— 于是半路就会误判成
+        "到位了"。必须等斜坡自己走完。
+        """
+        if self._ramp is not None and not self._ramp.done:
+            return False
+        return abs(self._theta() - self._ctrl.theta_des) <= tolerance_rad
+
+    def _advance_settle(self, dt: float) -> None:
+        """让仿真前进一小拍：线程在跑就等，没跑就自己走一步。"""
+        self._check_alive()
+        if self._connected:
+            # 物理线程在推。这里只等，绝不自己 mj_step —— 两个线程同时碰
+            # mjData 就是 _open_viewer 的 docstring 里记着的那个段错误。
+            time.sleep(_POLL_S)
+        else:
+            with self._lock:
+                self._tick(dt)
+
+    def command_fraction(
+        self,
+        fraction: float,
+        *,
+        force_n: Optional[float] = None,
+        velocity_m_s: float = C.DEFAULT_VELOCITY_M_S,
+    ) -> bool:
+        """发一条"走向某个开度"的指令，**立刻返回**。
+
+        与 :meth:`goto` 那一族的区别只有一处：不等。指令装上斜坡就走，剩下的
+        交给物理循环。这是遥操作/镜像这类"每拍发一条新目标"的场合要的形状 ——
+        用阻塞版会把控制回路自己卡住。
+
+        Args:
+            fraction: 归一化开度 ∈ [0, 1]。0 = 全闭，1 = 全开。
+            force_n: 电机出力上限 (N)。给定时把它换算成力矩限幅压在电机上，
+                所以撞到东西顶多出这么大劲。**这不是力控** —— 位置环还在，
+                误差大时输出会贴着上限饱和；想"夹住就不动了"要用
+                :meth:`grasp`/:meth:`set_force`。不给则用结构上限
+                :data:`constants.TAU_MAX`。
+            velocity_m_s: 单指线速度上限 (m/s)。默认
+                :data:`constants.DEFAULT_VELOCITY_M_S`，即全行程 1 秒。
+
+        Note:
+            斜坡起点取**当前**位置，不是上一条指令的目标。否则连发几条指令时，
+            限速算的是"从上一个目标算起"的距离，实际速度会超。
+        """
+        self._check_connected()
+        self._check_enabled()
+
+        with self._lock:
+            theta_now = self._theta()
+        theta_goal = C.q_to_theta(C.q_from_frac_open(float(np.clip(fraction, 0.0, 1.0))))
+        speed_rad_s = max(C.to_rad_s(abs(float(velocity_m_s))), 1e-9)
+        self._install_ramp(
+            LinearRamp(theta_now, theta_goal, speed_rad_s),
+            None,
+            None,
+            0.0,
+            None,
+            tau_max=None if force_n is None else C.n_to_nm(float(force_n)),
+        )
+        return True
+
+    # ── 窗口与输入 ─────────────────────────────────────────────────────
+
+    def keyboard_events(self) -> Dict[int, int]:
+        """取走自上次调用以来按下的键，返回 ``{键码: 事件}``。
+
+        无窗口时返回空字典 —— 调用方不需要先判断有没有窗口。
+
+        事件表由查看器的回调线程填、在这里被取空，所以**一次按键只会有一次
+        事件**；循环里每次 :meth:`pump` 之后取一次即可，别在两处都取。
+        键码用 :func:`litegrip_mujoco.key_label` 转成可读名字。
+        """
+        return self._keys.drain()
+
+    def mouse_events(self) -> List[Any]:
+        """永远是空列表。**MuJoCo 的被动查看器不报鼠标事件。**
+
+        ``launch_passive`` 只收一个 ``key_callback``；鼠标被查看器内部拿去转
+        视角和拖动扰动球了。这个方法是为了让例程的源码形状与 pybullet 那套一致
+        而存在的哑元：``clicked(events) or pressed(events, CONFIRM_KEYS)`` 这种
+        写法里，真值永远来自按键那一支。别指望它哪天会返回东西。
+        """
+        return []
+
+    def status_text(self, lines: Sequence[str]) -> bool:
+        """在查看器左上角叠加几行字。返回是否真的显示出来了。
+
+        仿真读数（开度、力、状态）打在窗口里比刷终端方便：终端一行行滚走，
+        窗口里的字贴着画面。
+
+        没有窗口、查看器太老没有 ``set_texts``、或底层抛异常时返回 ``False``，
+        **不抛异常** —— 叠字是锦上添花，不该让仿真因为显示不出来而中断。所以
+        返回值只用来决定"要不要退回终端打印"。
+        """
+        viewer = self._viewer
+        if viewer is None:
+            return False
+        setter = getattr(viewer, "set_texts", None)
+        if setter is None:
+            return False
+        try:
+            font = self._mujoco.mjtFontScale.mjFONTSCALE_150
+            grid = self._mujoco.mjtGridPos.mjGRID_TOPLEFT
+        except AttributeError:
+            return False
+        try:
+            with self._lock:
+                setter([(font, grid, str(line), "") for line in lines])
+        except Exception:
+            return False
+        return True
+
+    def focus_camera(
+        self,
+        *,
+        lookat: Optional[Sequence[float]] = None,
+        distance: Optional[float] = None,
+        azimuth: Optional[float] = None,
+        elevation: Optional[float] = None,
+    ) -> bool:
+        """摆一下查看器的相机。只改给了的参数，返回是否改成功。
+
+        自动取景就是这个用法：算好夹爪中心，:meth:`link_aabb` 量出尺度，再把
+        ``lookat``/``distance`` 设过来。没有窗口时返回 ``False``。
+        """
+        viewer = self._viewer
+        cam = getattr(viewer, "cam", None) if viewer is not None else None
+        if cam is None:
+            return False
+        try:
+            with self._lock:
+                if lookat is not None:
+                    cam.lookat[:] = np.asarray(lookat, dtype=np.float64)[:3]
+                if distance is not None:
+                    cam.distance = float(distance)
+                if azimuth is not None:
+                    cam.azimuth = float(azimuth)
+                if elevation is not None:
+                    cam.elevation = float(elevation)
+        except Exception:
+            return False
+        return True
 
     def reset(self, keyframe: Optional[str] = None) -> None:
         """复位到关键帧（默认为模型里的 ``home``，没有则回全开）。
@@ -1006,8 +1343,20 @@ class MujocoGripper:
                 viewer = self._viewer
                 if viewer is not None:
                     try:
-                        if viewer.is_running():
-                            viewer.sync()
+                        if not viewer.is_running():
+                            # 窗口被关掉 = 操作者要退出。置中止并结束循环，
+                            # 好让阻塞在 open()/close() 里的主线程醒过来。
+                            #
+                            # **这里不碰 self._viewer**：关窗和 close() 是两件
+                            # 事。把引用清在这里，disconnect() 就再也关不到那个
+                            # 已经关掉的句柄（无害），但更要紧的是清掉之后
+                            # disconnect() 的"线程卡住就别关窗"判定会失去依据，
+                            # 反而可能去关一个正在被 sync 的窗口。收尾统一交给
+                            # disconnect()。
+                            self._abort.set()
+                            self._running = False
+                            break
+                        viewer.sync()
                     except Exception:
                         self._viewer = None
             if self._realtime:
@@ -1033,7 +1382,43 @@ class MujocoGripper:
             self._data.ctrl[:] = 0.0
 
         self._mujoco.mj_step(self._model, self._data)
+        self._sim_time += dt
         self._update_thermal(dt)
+
+    def _install_ramp(
+        self,
+        ramp: Ramp,
+        kp: Optional[float],
+        kd: Optional[float],
+        tau_ff: float,
+        dq_target: Optional[float],
+        tau_max: Optional[float] = None,
+    ) -> None:
+        """清中止标志、装增益/前馈/斜坡，并置 MOVING。**非阻塞**。
+
+        这一步和"轮询到走完"是两件事，``_run_ramp`` 把两者串起来是为了给
+        ``open()``/``close()`` 那种"发一条指令、等它到位"的语义；而
+        :meth:`command_fraction` 只要前半段 —— 装上就走，由物理循环推。
+
+        ``tau_max=None`` 表示恢复结构上限 :data:`constants.TAU_MAX`。**每次
+        调用都会重设**，所以一次限力运动不会把限幅漏给下一条指令。
+
+        ⚠ 顺序是这个方法的一部分，别重排：先清 ``_abort``，再在锁内一次性把
+        增益、前馈、目标、斜坡全部就位。``_run_ramp`` 的力语义用例依赖
+        "``_abort`` 已清"这一前置条件。
+        """
+        self._abort.clear()
+        with self._lock:
+            self._ctrl.set_gains(
+                kp if kp is not None else self._config.kp,
+                kd if kd is not None else self._config.kd,
+            )
+            self._ctrl.set_feedforward(tau_ff)
+            self._ctrl.set_torque_limit(tau_max)
+            if dq_target is not None:
+                self._ctrl.set_target(self._theta(), dq_target)
+            self._ramp = ramp
+            self._status_flags |= GripperStatus.MOVING
 
     def _run_ramp(
         self,
@@ -1044,17 +1429,7 @@ class MujocoGripper:
         dq_target: Optional[float],
     ) -> bool:
         """装上一段斜坡并阻塞到它走完。"""
-        self._abort.clear()
-        with self._lock:
-            self._ctrl.set_gains(
-                kp if kp is not None else self._config.kp,
-                kd if kd is not None else self._config.kd,
-            )
-            self._ctrl.set_feedforward(tau_ff)
-            if dq_target is not None:
-                self._ctrl.set_target(self._theta(), dq_target)
-            self._ramp = ramp
-            self._status_flags |= GripperStatus.MOVING
+        self._install_ramp(ramp, kp, kd, tau_ff, dq_target)
 
         try:
             while not ramp.done:
@@ -1146,11 +1521,29 @@ class MujocoGripper:
                 return
             try:
                 import mujoco.viewer
-                self._viewer = mujoco.viewer.launch_passive(self._model, self._data)
+
+                launch = mujoco.viewer.launch_passive
+                if _accepts_key_callback(launch):
+                    self._viewer = launch(
+                        self._model, self._data, key_callback=self._on_key
+                    )
+                else:
+                    # MuJoCo 太老，launch_passive 不收 key_callback。窗口照开，
+                    # 只是收不到按键 —— 例程会退化成"只能看，不能遥控"。
+                    self._viewer = launch(self._model, self._data)
             except Exception as exc:
                 raise RuntimeError(
                     f"打不开 MuJoCo 查看器（需要图形环境）：{exc}"
                 ) from exc
+
+    def _on_key(self, keycode: int) -> None:
+        """查看器按键回调。**在查看器自己的线程里跑**。
+
+        这个函数只能做一件事：把一个整数塞进 :class:`KeyQueue`。绝不能在这里
+        碰 ``mjData``（物理线程正拿着它）、不能开关窗口、不能打印 —— 回调里
+        抛出的异常会堆在查看器线程上，而它离 MuJoCo 的内部状态太近。
+        """
+        self._keys.feed(int(keycode))
 
     def _check_connected(self) -> None:
         if not self._connected:

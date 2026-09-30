@@ -1231,7 +1231,11 @@ class TestApiParity:
             return
         sim_only = {"step", "settle", "reset", "release_fixture", "hold_fixture",
                     "gap_mm", "frac_open", "set_frac_open", "launch_viewer",
-                    "sync_viewer", "model", "data", "model_path", "IS_SIMULATED"}
+                    "sync_viewer", "model", "data", "model_path", "IS_SIMULATED",
+                    # 循环骨架与窗口/输入层（pybullet 例程要的形状）
+                    "connected", "pump", "gui", "sim_time", "command_fraction",
+                    "keyboard_events", "mouse_events", "status_text",
+                    "focus_camera"}
         overlap = sim_only & {n for n in dir(cls) if not n.startswith("_")}
         assert not overlap, f"仿真独有成员与 SDK 撞名: {sorted(overlap)}"
 
