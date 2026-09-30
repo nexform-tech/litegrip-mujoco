@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from . import constants
+from . import constants, world
 from ._litegrip import HAS_SDK, sdk_unavailable_reason
 from .calibration import (
     Calibration,
@@ -52,6 +52,7 @@ from .calibration import (
 from .dryrun import DryRunGripper
 from .gripper import DEFAULT_MODEL, SCENE_MODEL, MujocoGripper
 from .mirror import DualGripper, MirrorMode, read_frac_open, write_frac_open
+from .world import MujocoContact
 from .window import (
     CONFIRM_KEYS,
     QUIT_KEYS,
@@ -132,6 +133,9 @@ __all__ = [
     "select_calibration_for",
     # 无硬件
     "DryRunGripper",
+    # 世界查询
+    "MujocoContact",
+    "world",
     # 窗口与键盘输入（例程的循环骨架用）
     "KeyQueue",
     "CONFIRM_KEYS",

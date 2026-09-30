@@ -76,6 +76,7 @@ from .controller import (
     Ramp,
     TrajectoryRamp,
 )
+from . import world
 from .window import (
     CONFIRM_KEYS,
     QUIT_KEYS,
@@ -1296,6 +1297,82 @@ class MujocoGripper:
                 self._data.qvel[i] = 0.0
             self._ctrl.set_target(C.q_to_theta(q), 0.0)
 
+    # ── 世界查询与备用工件 ─────────────────────────────────────────────
+
+    def box_slots(self) -> List[str]:
+        """备用工件槽的名字，按序。无槽位的模型（``litegrip.xml``）返回空表。"""
+        return world.slot_names(self._model)
+
+    def add_box(
+        self,
+        index: int,
+        *,
+        pos: Optional[Sequence[float]] = None,
+        size: Sequence[float] = (0.010, 0.010, 0.010),
+        quat: Optional[Sequence[float]] = None,
+        mass: Optional[float] = None,
+    ) -> str:
+        """把第 ``index`` 个备用方块搬到 ``pos``，改尺寸。返回它的 body 名。
+
+        ``pos`` 默认是 :meth:`grasp_center` —— 也就是两指之间，放进去就能夹。
+
+        ⚠ 是**搬运**不是**新建**：同一个槽位反复用会覆盖上一次的尺寸、质量和
+        速度；槽位只有 :meth:`box_slots` 那么多个。:meth:`reset` 会把所有槽位
+        放回地板上的停放位。
+
+        尺寸改变会重算质量与惯量（MuJoCo 在编译期算这两个，运行期改
+        ``geom_size`` 它不会自己发现），所以这个调用比看上去重：它要跑一次
+        ``mj_setConst``。
+
+        Raises:
+            IndexError: 没有这个槽位，或者模型根本没有槽位。
+        """
+        with self._lock:
+            target = self.grasp_center() if pos is None else pos
+            return world.add_box(
+                self._model, self._data, index,
+                pos=target, size=size, quat=quat, mass=mass,
+            )
+
+    def contacts(
+        self,
+        *,
+        only: Optional[Sequence[str]] = None,
+        with_force: bool = True,
+    ) -> List[world.MujocoContact]:
+        """当前接触点，名字已解析。
+
+        ``only`` 给一组 geom 名或 body 名，只保留沾边的那些 ——
+        ``sim.contacts(only=("object",))`` 就是"工件碰到了什么"。
+
+        ⚠ 每次调用都重新构造列表：MuJoCo 复用同一块 contact 缓冲，攥着上一次
+        的列表不放是安全的，攥着 ``data.contact`` 不放不是。
+        """
+        with self._lock:
+            return world.contacts(
+                self._model, self._data, only=only, with_force=with_force
+            )
+
+    def link_aabb(self, body: str = "base_link") -> Tuple[np.ndarray, np.ndarray]:
+        """某个 body 的世界系包围盒 ``(lo, hi)``。
+
+        盒子/球是精确的；网格回落到编译期算好的包围球，所以对网格是**保守的**
+        外接盒，不能当作测量值用。取景、判断"在不在附近"是它的用途。
+        """
+        with self._lock:
+            return world.body_aabb(self._model, self._data, body)
+
+    def pad_aabbs(self) -> Tuple[Tuple[np.ndarray, np.ndarray],
+                                 Tuple[np.ndarray, np.ndarray]]:
+        """两指夹持面的包围盒 ``(left, right)``。"""
+        with self._lock:
+            return world.pad_aabbs(self._model, self._data)
+
+    def grasp_center(self) -> np.ndarray:
+        """两指夹持面中心的中点 (m)，世界系。工件该放的位置，相机该看的点。"""
+        with self._lock:
+            return world.grasp_center(self._model, self._data)
+
     def launch_viewer(self) -> None:
         """打开被动查看器（等价于构造时 ``render=True``）。"""
         self._open_viewer()
@@ -1489,6 +1566,9 @@ class MujocoGripper:
             )
         self._mujoco.mj_resetDataKeyframe(self._model, self._data, key_id)
         self._mujoco.mj_forward(self._model, self._data)
+        # 键位没提到备用槽位，自由关节被补零 = 位于世界原点，也就是夹爪底座
+        # 里面。litegrip.xml 的 open/home 早于槽位存在，改不了，只能在这里补。
+        world.park_spawns(self._model, self._data)
 
     def _update_thermal(self, dt: float) -> None:
         """一阶热模型：焦耳热 ∝ τ²，向环境温度散热。示意用，非标定值。"""
