@@ -172,6 +172,12 @@ MEASURED_COMM_LOSS_S = 0.9
 # 了。SDK 的 ``control_mit_stream`` 和 LiteGrip 控制台都是持续发帧的，正是为此。
 IDLE_HZ = FRAME_HZ
 
+# 等一帧新状态帧时，每次「喂一帧 + 收一拍」的时间片 [s]。
+#
+# 取一帧的时长（5 ms）：这样每一片里都恰有一次收帧机会，等一帧的正常代价就是
+# 一到两片，而读不到时最多浪费 FRESH_WAIT_S 而不是更多。见 wait_fresh_while_feeding。
+FEED_SLICE_S = FRAME_DT
+
 # ``--dry-run --headless`` 那条路上顶替「那只手」的脚本：``(目标开度, 到位后停留 s)``。
 #
 # 每段先花 SCRIPT_MOVE_S 线性走到目标，再原地停 dwell 秒。停留段不是装饰：到位之后
@@ -528,6 +534,42 @@ class IdleKeeper:
         return False
 
 
+def wait_fresh_while_feeding(gripper, keeper, timeout_s=FRESH_WAIT_S):
+    """等一帧新状态帧，**等待期间照常把帧喂出去**；等不到返回 ``None``。
+
+    为什么不能只调一次 ``fresh_state``：达妙电机是**收到一帧回一帧**，自己不会凭空
+    发状态帧——SDK 的 ``_enable_and_hold`` 也是「一边发零增益帧、一边等回帧」，同一
+    个原因。而本样例的收发全在主循环这一个线程里，主循环每拍开头那次非阻塞
+    ``poll``（见 ``read_real``）已经把上一帧的回帧收走了。于是单线程里干等 50 ms
+    时：没有帧在飞、也没人发帧 → 回帧永远不来，干等到超时。
+
+    实测形态（真机，按住 ←/→）：每按一下都走这条路，终端刷出一屏「读不到真机的
+    状态帧」，真机一步都不动，退出时还报「一次目标都没改过」。04 没有这个毛病——
+    它的循环里没有那次提前的 poll，等的时候上一帧的回帧还在飞。
+
+    等待期间调 ``keeper.maybe_send`` 而不是新造一帧：发出去的还是它本来就在发的
+    那一帧（目标 = 上次锁住的位置、不命令任何运动），只是别让总线空着。
+
+    Args:
+        gripper: 夹爪。
+        keeper: 空闲保活（可以为 ``None``，那就只能干等）。
+        timeout_s: 最多等多久 [s]。
+
+    Returns:
+        ``GripperState``；``timeout_s`` 内没有新的状态帧则 ``None``。
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0.0:
+            return None
+        if keeper is not None:
+            keeper.maybe_send(time.monotonic())
+        state = fresh_state(gripper, timeout_s=min(FEED_SLICE_S, left))
+        if state is not None:
+            return state
+
+
 def read_real(gripper):
     """读一帧真机状态，返回 ``(开度, 夹持力 N, 是否在动, 故障)``。
 
@@ -744,6 +786,7 @@ def main():
     last_print = 0.0
     last_target_pct = None   # None = 还没对齐过基准，第一帧只对齐
     drags = 0                # 改过几次目标 = 建过几条驱动
+    rejected = 0             # 因为读不到状态帧而拒发的次数（按键没白按，但真机没动）
     faulted = False          # 真机报故障：停发、不再对着不听话的电机发帧
     shown_rad = None         # 窗口里的「命令位置」（dry-run 与没读过真机时用它）
     started = time.monotonic()
@@ -850,10 +893,12 @@ def main():
                     # 说的位置」，还没有一条指令。拿旧读数当起点，限速本身就没有意义
                     # 了——一步就是从错的地方走到目标。所以拿不到就拒绝，别猜。
                     if live:
-                        state = fresh_state(gripper)
+                        state = wait_fresh_while_feeding(gripper, keeper)
                         if state is None:
+                            rejected += 1
                             print(f"\n读不到真机的状态帧（等了 "
-                                  f"{FRESH_WAIT_S * 1000:.0f} ms），**不下发**：")
+                                  f"{FRESH_WAIT_S * 1000:.0f} ms，期间保活帧照发），"
+                                  "**不下发**：")
                             print("   限速要按「现在」的位置算，拿旧读数算出来的"
                                   "是一条阶跃指令，电机接不住。")
                             print("   先看真机怎么了："
@@ -1012,8 +1057,15 @@ def main():
 
     if faulted:
         return 1
-    if drags == 0:
+    if drags == 0 and rejected == 0:
         print("\n一次目标都没改过：按 ←/→ 真机才会动，启动之后它一直锁在当前位置。")
+    elif drags == 0:
+        # 按了键、但一条指令都没发出去。这和「一次都没按」不是一回事，别报成一样：
+        # 上一版不管按没按都报「一次目标都没改过」，把真正的原因埋掉了。
+        print(f"\n按键收到了 {rejected} 次，但一条指令都没发出去：每次都读不到真机的"
+              "状态帧，真机一步都没动。")
+        print("   查 CAN 连接和供电，或先跑 "
+              "python3 examples/05_dual_control.py --status 看真机状态。")
     print("完成。反向的（真机 → 仿真）见 examples/04_mirror_real.py")
     return 0
 
