@@ -46,6 +46,21 @@
   x = -0.067 + 0.0235 = -0.0435 —— 87.000 mm 开口因而是精确的。
   本体不加碰撞体（与 litearm7.xml 的做法一致）。
 
+  ────────────────────────────────────────────────────────────────────────
+  碰撞体放在第 3 组
+  ────────────────────────────────────────────────────────────────────────
+
+  四个碰撞 box 都写了 group="3"。group **只影响渲染**，碰撞只看 contype /
+  conaffinity，所以这么写不动任何动力学、也不动任何接触。
+
+  为什么必须写：这四块不属于零件外观，是代理几何。它们 z 向刻意超出网格
+  （夹持面 box 要覆盖网格上 x≥0.0230 的全部顶点），默认组（0）下会从白色
+  STL 里透出来，在查看器里显示成指尖上方两块灰色方块——看着像模型画错了。
+
+  查看器默认只画第 0/1/2 组（`mujoco.MjvOption()` 的 geomgroup 就是
+  `[1 1 1 0 0 0]`，`launch_passive` 用的正是这个默认值）。要在界面上看碰撞
+  体，Rendering 面板里勾上第 3 组即可。
+
   ⚠ MuJoCo 会在编译期对网格做主轴对齐（mesh_pos / mesh_quat），并把 geom 的
     默认 pos/quat 设成同一个变换来抵消它。所以网格 geom **不要**手写 pos/quat，
     否则会覆盖掉这个补偿、把零件转歪。当前 URDF 的视觉原点本就是 xyz=0 rpy=0，
@@ -120,8 +135,9 @@
         <joint name="gripper_slide_joint_right" axis="1 0 0" range="0 0.042726" />
         <geom name="finger_right_vis" type="mesh" mesh="finger_right_mesh"
               material="mat_finger" contype="0" conaffinity="0" />
-        <!-- 滑座：STL 该区域 x∈[-0.00095,0.02195] y∈[-0.0315833,0.0294167] z∈[-0.0135833,0.005] -->
-        <geom name="finger_right_col_body" type="box"
+        <!-- 滑座：STL 该区域 x∈[-0.00095,0.02195] y∈[-0.0315833,0.0294167] z∈[-0.0135833,0.005]
+             group=3：碰撞代理不该出现在画面里，理由见文件头「碰撞体放在第 3 组」。 -->
+        <geom name="finger_right_col_body" type="box" group="3"
               pos="0.0105000 -0.0010833 -0.00429165"
               size="0.0114500 0.0305000 0.00929165" />
         <!--
@@ -129,7 +145,7 @@
           y 中心 -0.0010833 恰好抵消关节原点的 y 偏移，故在 base_link 系中
           该面关于 y=0 对称。z 覆盖网格上 x>=0.0230 的全部顶点（含 0.4 mm 内缩）。
         -->
-        <geom name="finger_right_col_pad" type="box"
+        <geom name="finger_right_col_pad" type="box" group="3"
               pos="0.0167500 -0.0010833 0.0626520"
               size="0.0067500 0.0119595 0.0157940" />
       </body>
@@ -140,10 +156,10 @@
         <joint name="gripper_slide_joint_left" axis="-1 0 0" range="0 0.042726" />
         <geom name="finger_left_vis" type="mesh" mesh="finger_left_mesh"
               material="mat_finger" contype="0" conaffinity="0" />
-        <geom name="finger_left_col_body" type="box"
+        <geom name="finger_left_col_body" type="box" group="3"
               pos="-0.0105000 0.0010833 -0.00429165"
               size="0.0114500 0.0305000 0.00929165" />
-        <geom name="finger_left_col_pad" type="box"
+        <geom name="finger_left_col_pad" type="box" group="3"
               pos="-0.0167500 0.0010833 0.0626520"
               size="0.0067500 0.0119595 0.0157940" />
       </body>
