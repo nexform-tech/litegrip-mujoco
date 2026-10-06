@@ -163,10 +163,12 @@ def interactive(sim) -> None:
             force_n=sim.get_force(),
         )
         print(line, end="\r")
+        # 窗口里的字只能写 ASCII：查看器的内置字体没有中文字形，中文会画成实心
+        # 方块（见 MujocoGripper.status_text 的说明）。终端打印照旧用中文。
         sim.status_text([
-            f"开度 {sim.frac_open() * 100:5.1f}%  "
-            f"开口 {sim.gap_mm():5.2f} mm  "
-            f"力 {sim.get_force():5.2f} N"
+            f"open {sim.frac_open() * 100:5.1f}%  "
+            f"gap {sim.gap_mm():5.2f} mm  "
+            f"force {sim.get_force():5.2f} N"
         ])
         if not sim.pump():
             break

@@ -287,6 +287,10 @@ python3 examples/05_dual_control.py --dry-run
 `command_fraction()`、`gui`、`keyboard_events()`、`mouse_events()`（恒为空表 —— 被动
 查看器不给鼠标事件）、`status_text()`、`focus_camera()`。
 
+`status_text()` 用 MuJoCo 内置的位图字体画字，那套字体没有中文字形——一个汉字画出来
+是一个实心方块。所以窗口叠字一律 ASCII，中文留在终端。详见[例程
+README](examples/README.zh-CN.md#为什么窗口里的字只有英文)。
+
 世界查询：`box_slots()`、`add_box()`、`contacts()`、`link_aabb()`、`pad_aabbs()`、
 `grasp_center()`。
 

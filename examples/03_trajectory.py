@@ -300,11 +300,13 @@ def record_phase(gripper, sim, args):
             state = read_state(gripper)
             fraction = mirror(gripper, sim, state)
         samples = int(gripper.trajectory_status().get("samples") or 0)
+        # 窗口里的字只能写 ASCII：查看器的内置字体没有中文字形，中文会画成实心
+        # 方块（见 MujocoGripper.status_text 的说明）。终端打印照旧用中文。
         sim.status_text([
-            f"录制中 · 已采 {samples} 个样本   "
-            + ("未读到状态帧（窗口停在最后读数）" if fraction is None else
-               f"开度 {fraction * 100:5.1f}%   "
-               f"开口 {fraction_to_gap_mm(fraction):5.2f} mm")
+            f"REC {samples} samples   "
+            + ("no status frame (frozen)" if fraction is None else
+               f"open {fraction * 100:5.1f}%   "
+               f"gap {fraction_to_gap_mm(fraction):5.2f} mm")
         ])
         if now - last_print >= PRINT_DT:
             last_print = now
@@ -369,7 +371,7 @@ def wait_for_start(sim, keeper):
         return True
     print("\n   录制结束。回放会把真机动起来，所以不自己开始：")
     print("   按 Enter / 空格 → 开始回放；按 Esc / Q → 先不放，退出")
-    sim.status_text(["录完了 · 按 Enter / 空格开始回放"])
+    sim.status_text(["RECORDED - press Enter / Space to replay"])
     # 先丢掉结束录制那一拍的按键：同一个 Enter / 空格不该一次算两回——按一下结束
     # 录制，紧接着又被当成「开始回放」。
     sim.keyboard_events()
@@ -381,7 +383,7 @@ def wait_for_start(sim, keeper):
         if pressed(keys, QUIT_KEYS):
             print("\n   收到退出键：先不放")
             # 窗口里那行字要跟着改，不然画面还停在「等你确认」。
-            sim.status_text(["没有确认，这次不回放 · 按 Esc / Q 退出"])
+            sim.status_text(["not confirmed - press Esc / Q to quit"])
             return False
         feed(keeper)
         if not sim.pump():
@@ -442,11 +444,11 @@ def play_online(gripper, sim, trajectory, args, keeper):
             status = gripper.trajectory_status()
             done = not status.get("active")
             sim.status_text([
-                f"回放中 · {status.get('frames', 0)} 帧 · "
+                f"PLAY {status.get('frames', 0)} frames - "
                 f"{status.get('loop_hz', 0):.0f} Hz   "
-                + ("未读到状态帧（窗口停在最后读数）" if fraction is None else
-                   f"开度 {fraction * 100:5.1f}%   "
-                   f"开口 {fraction_to_gap_mm(fraction):5.2f} mm")
+                + ("no status frame (frozen)" if fraction is None else
+                   f"open {fraction * 100:5.1f}%   "
+                   f"gap {fraction_to_gap_mm(fraction):5.2f} mm")
             ])
             if now - last_print >= PRINT_DT:
                 last_print = now
@@ -499,9 +501,9 @@ def play_offline(sim, trajectory, args):
         fraction = trajectory.openness_at(t)
         sim.set_frac_open(fraction)
         sim.status_text([
-            f"回放中 · {t:5.2f} / {trajectory.duration:.2f} s   "
-            f"开度 {fraction * 100:5.1f}%   "
-            f"开口 {fraction_to_gap_mm(fraction):5.2f} mm"
+            f"PLAY {t:5.2f} / {trajectory.duration:.2f} s   "
+            f"open {fraction * 100:5.1f}%   "
+            f"gap {fraction_to_gap_mm(fraction):5.2f} mm"
         ])
         if now - last_print >= PRINT_DT:
             last_print = now
