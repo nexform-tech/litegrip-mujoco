@@ -168,6 +168,14 @@ layer. The pad box's `+x` face sits exactly on mesh `x = 0.0235`, i.e. world `x 
 `q = 0` — which is what makes the 87.000 mm opening exact. The base body has no collision geometry
 at all, matching `litearm7.xml`.
 
+The four collision boxes carry `group="3"`, which is visual only: collision reads `contype` and
+`conaffinity`, never the group, so no dynamics and no contact change. It is not optional. The boxes
+deliberately overshoot the mesh — the pad box has to cover every vertex with `x ≥ 0.0230` — so in
+the default group they poke through the white STL and render as two grey blocks above the
+fingertips, which reads as a broken model. The viewer draws groups 0-2 only: `mujoco.MjvOption()`
+defaults to `[1 1 1 0 0 0]` and `launch_passive` uses that default. Tick group 3 in the Rendering
+panel to see the proxies.
+
 ⚠ **Never write `pos`/`quat` on a mesh geom.** MuJoCo principal-axis-aligns meshes at compile time
 and sets the geom's default `pos`/`quat` to the same transform to cancel it out. Overwriting them
 un-cancels the rotation and tilts the part. A regression test guards this.
