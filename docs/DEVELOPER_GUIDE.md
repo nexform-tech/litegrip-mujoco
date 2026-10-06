@@ -342,6 +342,16 @@ call and catching `TypeError`, because a `TypeError` from *inside* `launch_passi
 the window already exists, and retrying would leave an orphan window nobody syncs. On an older
 MuJoCo the window still opens; `keyboard_events()` simply stays empty.
 
+**The overlay font is Latin-only.** `status_text()` reaches the window through `mjr_overlay`,
+which draws with MuJoCo's built-in bitmap font. That font has no CJK glyphs — every Chinese
+character renders as a filled rectangle — so a line of Chinese reads as a row of blocks. Measured
+here through the same call (`mjFONTSCALE_150`): `'A'` is 70 ink pixels with a legible glyph, `'真'`
+is a filled 12×10 rectangle, `'开'` is a filled 24×15 rectangle plus an overflow bar. Keep overlay
+strings ASCII and leave the Chinese to the terminal, which has the fonts. The library does not
+filter: `lines` goes to `set_texts()` unchanged, so the rule is enforced by
+`tests/test_example_overlay_text.py`, which scans every `status_text()` call under `examples/` and
+fails on a non-ASCII literal.
+
 **A closed window is a disconnect.** `_sim_loop()` checks `viewer.is_running()` under the lock on
 every tick. When it goes false the operator has closed the window, so the loop sets `_abort`
 (which wakes a main thread blocked inside `open()` / `close()`) and breaks. It deliberately does

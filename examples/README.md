@@ -701,6 +701,19 @@ the opening and `contacts()` for what is touching what.
 then passes that module to its own `open_gripper()`. The calibration, connect,
 verify and enable steps are the same ones; only the module's origin differs.
 
+### Why the window text is ASCII
+
+The viewer draws `status_text()` with MuJoCo's built-in bitmap font, and that
+font has no CJK glyphs: each Chinese character comes out as a solid box, so a
+line of Chinese is a row of blocks. Measured on this machine through the same
+path (`mjr_overlay`, `mjFONTSCALE_150`): `'A'` is 70 ink pixels with a legible
+glyph, `'真'` is a filled 12×10 rectangle, `'开'` is a filled 24×15 rectangle
+plus an overflow bar.
+
+So the overlay text is English and the terminal output is Chinese — a terminal
+has CJK fonts, the viewer does not. `tests/test_example_overlay_text.py` scans
+every `status_text()` call in `examples/` and fails on a non-ASCII literal.
+
 ### A window that ends in `Segmentation fault`
 
 If a run that opened the viewer ends with `Segmentation fault (core dumped)`

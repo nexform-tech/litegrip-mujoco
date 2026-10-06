@@ -323,13 +323,15 @@ def main():
             real_fraction = rad_to_fraction(gripper, state.position_rad)
             mirror(sim, real_fraction)
 
+            # 窗口里的字只能写 ASCII：查看器的内置字体没有中文字形，中文会画成实心
+            # 方块（见 MujocoGripper.status_text 的说明）。终端打印照旧用中文。
             sim.status_text([
-                f"真机 {real_fraction * 100:5.1f}%   "
-                f"开口 {fraction_to_gap_mm(real_fraction):5.2f} mm   "
-                f"力 {state.force_n:5.2f} N   "
-                + ("未读到状态帧（画面停在最后读数）" if stale else
-                   ("失力中（可手推）" if zero_gravity else
-                    ("只读（不发帧）" if passive else "锁位中")))
+                f"REAL {real_fraction * 100:5.1f}%   "
+                f"gap {fraction_to_gap_mm(real_fraction):5.2f} mm   "
+                f"force {state.force_n:5.2f} N   "
+                + ("no status frame (frozen)" if stale else
+                   ("ZERO-G (nudge by hand)" if zero_gravity else
+                    ("PASSIVE (sends no frames)" if passive else "LOCKED")))
             ])
 
             if now - last_print >= PRINT_DT:

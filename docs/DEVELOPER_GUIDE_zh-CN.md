@@ -313,6 +313,14 @@ arena，`mj_makeConstraint` 无法扩容，于是报
 也可能来自 `launch_passive` **内部**，那时窗口已经建好了，重试会在屏幕上多留一个没人
 sync 的孤儿窗口。老版本 MuJoCo 上窗口照开，只是 `keyboard_events()` 永远为空。
 
+**叠字字体只有西文。** `status_text()` 是通过 `mjr_overlay` 画到窗口上的，用的就是
+MuJoCo 内置的位图字体。那套字体没有中文字形——一个汉字画出来是一个实心矩形，一行中文
+就是一行方块。本机在同一条调用上实测（`mjFONTSCALE_150`）：`'A'` 70 个笔画像素、字形
+可辨；`'真'` 是 12×10 的实心矩形；`'开'` 是 24×15 的实心矩形外加一条溢出横杠。所以窗口
+里的字写 ASCII，中文留给终端——终端有字体。库这一层**不做**过滤：`lines` 原样交给
+`set_texts()`，所以这条规矩靠 `tests/test_example_overlay_text.py` 守，它把 `examples/`
+里每个 `status_text()` 调用扫一遍，出现非 ASCII 字面量就报错。
+
 **窗口被关掉 = 断开。** `_sim_loop()` 每一拍都在锁里查一次 `viewer.is_running()`；它变
 成 false 就说明操作者把窗口关了，于是循环置上 `_abort`（阻塞在 `open()` / `close()` 里的
 主线程会因此醒过来）并退出。它**刻意不清** `self._viewer`：关窗口和关查看器句柄是两件

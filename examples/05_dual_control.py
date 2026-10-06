@@ -993,32 +993,37 @@ def main():
             sim.set_frac_open(
                 real_fraction if live else rad_to_fraction(gripper, shown_rad))
 
+            # 阶段名要两份：窗口里那份必须是 ASCII——查看器的内置字体没有中文字形，
+            # 中文进去就是一片实心方块（见 MujocoGripper.status_text 的说明）。
+            # 终端那份照旧用中文。
             if faulted:
-                phase = "故障"
+                phase, phase_win = "故障", "FAULT"
             elif drive is not None and not drive.arrived():
                 phase = f"跟随中 → {target_pct:.0f}%"
+                phase_win = f"TRACK -> {target_pct:.0f}%"
             elif drive is not None and drive.closing and force_n > 0.0:
                 phase = f"到位·加力 {force_n:g} N"
+                phase_win = f"HOLD {force_n:g} N"
             elif drive is not None:
-                phase = "到位"
+                phase, phase_win = "到位", "HOLD"
             elif not live:
-                phase = "空闲"
+                phase, phase_win = "空闲", "IDLE"
             elif real_moving:
-                phase = "锁位·真机在动"
+                phase, phase_win = "锁位·真机在动", "LOCK (hardware moving)"
             else:
-                phase = "锁位"
+                phase, phase_win = "锁位", "LOCK"
             commanded = rad_to_fraction(gripper, shown_rad) * 100
             if live:
                 sim.status_text([
-                    f"真机 {real_fraction * 100:5.1f}%   "
-                    f"命令 {commanded:5.1f}%   "
-                    f"力 {real_force_n:5.2f} N   {phase}"
+                    f"REAL {real_fraction * 100:5.1f}%   "
+                    f"CMD {commanded:5.1f}%   "
+                    f"force {real_force_n:5.2f} N   {phase_win}"
                 ])
             else:
                 sim.status_text([
-                    f"命令 {commanded:5.1f}%   目标 {target_pct:5.1f}%   "
-                    f"速度 {speed_pct:3.0f}%   {phase}"
-                    "   （dry-run：没有真机）"
+                    f"CMD {commanded:5.1f}%   TARGET {target_pct:5.1f}%   "
+                    f"speed {speed_pct:3.0f}%   {phase_win}"
+                    "   (dry-run: no hardware)"
                 ])
             if now - last_print >= PRINT_DT:
                 last_print = now

@@ -306,6 +306,11 @@ Loop and viewer additions, matching the shape of the PyBullet examples: `pump()`
 `mouse_events()` (always empty — the passive viewer delivers no mouse events), `status_text()`,
 `focus_camera()`.
 
+`status_text()` draws with MuJoCo's built-in bitmap font, which has no CJK
+glyphs — a Chinese character renders as a solid box. Overlay text must be ASCII;
+the terminal output stays Chinese. See the [examples
+README](examples/README.md#why-the-window-text-is-ascii).
+
 World queries: `box_slots()`, `add_box()`, `contacts()`, `link_aabb()`, `pad_aabbs()`,
 `grasp_center()`.
 
