@@ -2,59 +2,21 @@
 # -*- coding: utf-8 -*-
 """样例 04 · 镜像模式 — 仿真跟随真机的开度同步显示
 
-方向是 **真机 → 仿真**：真机是「主」，仿真只是显示器。每一帧读一次真机的位置，
-然后把仿真手指瞬移过去（``set_frac_open``，纯运动学，不跑动力学）——所以画面
-显示的就是真机现在的样子，没有跟随延迟、也不会自己漂。
+方向是 **真机 → 仿真**：真机是「主」，仿真只是显示器。每一帧读一次真机的位置，就把
+仿真手指瞬移过去，所以画面显示的就是真机现在的样子，没有跟随延迟、也不会自己漂。
 
-前提:
-  1. 真机接在 CAN 总线上（默认 can0，用 --channel 换）
-  2. 装了本仓库要的 litegrip SDK（没有发布到 PyPI，从源码装；三个真机样例用的是
-     同一份，nexform-tech/litegrip-python）:
-       pip install -e /path/to/litegrip-python
-     或 export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src
-     或把 litegrip-python 仓库克隆到本仓库的同级目录
-  3. 一份可用的标定。标定文件由上位机标定后保存得到：
-       litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
-     仿真的百分比和毫米都由标定的角度换算而来，拿别台机器的刻度换算，画面就是错的。
-     所以优先用 ``--calib`` 指**这台夹爪**自己那份；不给就用 SDK 包里那份出厂标定
-     （台架夹具的实测参数），出厂文件也读不出来才会在终端里列出候选让你选，选不出来
-     （非交互、没有候选）直接退出。
+用法:
+  不给选项        默认模式：持续发「锁在实测位置」的保持帧，手指有刚度、推它会顶回来
+  --zero-gravity  真机的电机失力，可以用手推着走（推荐，最能看出镜像效果）——这时
+                  手指也会因重力或外力自己滑动，托住夹爪再看
+  --passive       只连接、只读，不使能也不发帧，由别的程序去驱动真机
+  --dry-run       没有硬件时用：拿一台替身顶替真机，另起线程按脚本动作驱动它
+  Z               运行中随时在失力 / 使能之间切换（--passive 与 --dry-run 下无效）
+  Esc / Q         退出（退出前会失能：手指会松、夹着的东西会掉）
 
-三种用法：
-
-  * **用手推着看**（推荐，最能看出镜像效果）：加 ``--zero-gravity``，真机的电机
-    失力，可以用手推动手指；仿真窗口会跟着你的手走。运行中按 **Z** 也能随时切换
-    失力 / 使能。
-  * **看别人的程序驱动**：加 ``--passive``，本样例只连接、只读，**不使能也不发
-    帧**；由那个程序去喂真机。
-  * **没有硬件**：加 ``--dry-run``，用 :class:`~litegrip_mujoco.DryRunGripper`
-    顶替真机。它对外声称的是**真机口径**的 θ 端点，所以下面的 θ → 开度换算与接
-    真机时走的是同一条路。另起一个线程按一段脚本动作驱动它（``open`` / ``goto`` /
-    ``close`` / ``grasp``），镜像循环照常读它——那条脚本就是「那只手」。
-
-注意：默认模式必须持续发帧。**使能态**的电机静默约 MEASURED_COMM_LOSS_S 就锁进
-通信丢失故障（0xD）——红灯闪、位置照读、指令一律不执行，所以「只是看」也得喂帧，
-见 FRAME_HZ。别拿电机的 ``TIMEOUT`` 寄存器（RID 9）推算这个时长：它读到过 8000 ms，
-也读到过 0＝当前不生效，和实测都对不上，SDK 自己把这条标成「待查」。默认模式发的
-是「锁在实测位置」的保持帧（零前馈、目标就是它现在的位置），不命令任何运动，但会
-让手指有刚度、推它它会顶回来。要看别人的程序驱动就用 ``--passive``：它**不使能**，
-一帧都不发，所以也不会因为「使能了却没人喂帧」把电机锁成 0xD 故障。
-
-注意：``--zero-gravity`` 时真机是**软**的。手指可以被推动，也会因为重力或外力
-自己滑动。托住夹爪再看，别让它在行程中间突然松掉。
-
-按键:
-  Z         真机失力（可用手推）/ 恢复使能（--passive 与 --dry-run 下无效）
-  Esc / Q   退出（退出前会**失能**：手指会松、夹着的工件会掉，但不会在电机上
-            留下通信超时故障——使能态静默约 0.9 s 就锁 0xD）
-
-运行:
-  python3 examples/04_mirror_real.py --zero-gravity --calib /path/to/这台夹爪的标定.json
-  python3 examples/04_mirror_real.py                    # 只镜像（发锁位帧保活）
-  python3 examples/04_mirror_real.py --passive          # 不使能、一帧不发，等别人喂
-  python3 examples/04_mirror_real.py --headless         # 无窗口，只看终端读数
-  python3 examples/04_mirror_real.py --duration 10      # 看 10 s 后自动退出
-  python3 examples/04_mirror_real.py --dry-run --duration 12 --headless
+前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK · 有一份
+      这台夹爪的标定（不给 --calib 就用 SDK 出厂那份）。装 SDK、选标定、为什么
+      「只是看」也得发帧见 examples/README.zh-CN.md。
 """
 import argparse
 import math
