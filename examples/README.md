@@ -619,6 +619,17 @@ and is not one. There is deliberately no second freshness gate: this SDK exposes
 no public "is this snapshot backed by data" flag, and `poll()` is the whole
 signal.
 
+**Do not** wait for a status frame on a silent bus from the thread that also
+sends the frames. The DM motor answers each command frame and sends nothing on
+its own — the SDK waits for its own enable acknowledgement by streaming
+zero-gain frames for exactly that reason. A bare `poll(timeout_s=...)` inside a
+loop that stops sending while it waits is therefore waiting for a reply nobody
+triggered. Example 05 did this on every keypress that changed the target: 50 ms
+of silence per key, then a rejection, and the hardware never moved.
+`wait_fresh_while_feeding(gripper, keeper)` in [`05_dual_control.py`](05_dual_control.py)
+waits in 5 ms slices and re-sends the keepalive frame between them, which keeps
+the replies coming without inventing a new target.
+
 `make_sim(headless)` is this repository's replacement for `pkg.connect(GUI)`: it
 builds a `MujocoGripper` over the bundled MJCF (`litegrip.xml`, or `scene.xml`
 with `--scene`) and turns rendering off for `--headless`.
