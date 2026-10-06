@@ -55,12 +55,28 @@ python3 -m pip install -e /path/to/litegrip-python     # 03–05
 `check_sdk_api()` 能分出来，它会点名缺哪几个成员（`LiteGrip.record_start`、
 `LiteGrip.poll`、`Trajectory.load`……），而不是等到控制循环里才炸。
 
-跑 03、04、05 之前先把 CAN 拉起来：
+跑 03、04、05 之前先把 CAN 拉起来。**这一步不用你手动做**：三个样例在连接前会用
+`ip -details link show` 读一次接口，只有状态**真的不对**时才去跑那几条需要特权的
+`ip` 命令。接口本来就是对的，就一条命令都不跑、也不问密码。要自己管接口，加
+`--no-can-setup`。
 
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0          # 探测读的就是这条，带 -details
+python3 examples/04_mirror_real.py --no-can-setup   # 或者接口自己管
+```
+
+自动那一步真要修的时候跑的东西，也是手动那份配方：
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+sudo ip link set can0 up
 ip -details link show can0
 ```
+
+`restart-ms` 不能省。内核默认是 `restart-ms 0`，意思是控制器进了 bus-off 之后**不会
+自己恢复**：一帧坏帧就能让接口处于「up 着、比特率也对、却什么都发不出去」的状态。有些
+USB 适配器不认这个选项，样例只会去掉它重试那一条命令，别的一概不动。
 
 > **03、04、05 会真的动电机。** 先读[上真机之前](#上真机之前)。
 
@@ -420,6 +436,16 @@ ip -details -statistics link show can0      # 总线忙？你什么都没跑而�
 ip -details link show can0
 ```
 
+要带 `-details` 读。只看标志位不够——好的接口和 bus-off 的接口都印 `UP,LOWER_UP`、
+比特率也都对，只有 `can state` 分得开；而 bus-off 的控制器一帧都发不出去，这正是
+`使能失败: [Errno 100] Network is down` 通常的含义。那是**主机侧的链路问题，不是
+夹爪**：CAN 的 socket 在 down 的接口上照样 bind 得上，所以 `connect()` 会成功，直到
+发出第一帧才暴露。现在样例会先探测、只在真的不对时才修——配方在本文档靠前的地方。
+`restart-ms 0` 时，bus-off 的接口会一直坏着，直到有东西重新配置它。
+
+**别**拿样例去跑一条已经有别的程序在用的接口：拉起那一步不会把总线上已有的另一个主站
+赶走，SDK 也不共享它。
+
 ### 这次用的是哪份标定
 
 每一条碰真机的路径都从解析标定开始。`--calib <路径>` 用这台夹爪自己的那份：
@@ -457,14 +483,25 @@ SDK 源码和 PyBullet 仓库的实测数据写的，**没有**在本机对真�
 `--dry-run`、`--play` 和仿真路径跑过，引用的是那些运行的真实输出。硬件路径请先在台架上
 确认再信。
 
+CAN 探测只有「读」那一半验证过：解析器钉的是 `ip -details link show` 的真输出，
+`probe_can_link("can0")` 也对着活着的接口只读地跑过。「修」那一半——那串重新配置接口的
+`sudo ip` 命令——只对着替身跑过，**没人看着它把一个不对的接口拉起来过**。
+
 ## 共用的部分
 
 [`_common.py`](_common.py) 被五个样例共用，它自己不是样例。里面放着参数解析
 （`add_common_args()`、`add_hardware_args()`）、SDK 发现（`import_litegrip()`、
 `sdk_dir()`、`check_sdk_api()`）、标定解析（`choose_calibration_file()`、
 `factory_calibration_path()`、候选列表、「文件是否真的生效」的检查）、连接使能序列
-（`open_real_gripper()`）、`make_sim()`、`fresh_state()`、单位换算和状态行。所以每个
-样例都是先 `from _common import ...`，**再** import `litegrip_mujoco`。
+（`open_real_gripper()`）、CAN 接口探测（`ensure_can_link()`）、`make_sim()`、
+`fresh_state()`、单位换算和状态行。所以每个样例都是先 `from _common import ...`，
+**再** import `litegrip_mujoco`。
+
+`ensure_can_link(channel, repair=...)` 在造夹爪对象**之前**跑，接口不对就在开 socket
+之前停下来。`repair=False` 那次调用只报告不动手：05 的 `--status` 和 04 的 `--passive`
+走的是这条，因为它们的定义就是观察，替它们重新配置接口恰好把要看的证据抹了。**别**把
+「没修好」当成致命错误——它把读到的打出来、返回 `False`，紧接着那次连接尝试才是真正决定
+链路通不通的那一步。
 
 `fresh_state(gripper, timeout_s=...)` 是读真机位置的唯一途径：`poll()` 只在这次调用
 真的解出我们这台电机的状态帧时才返回 `True`，紧跟其后的快照才是实测值。**别**直接读

@@ -346,6 +346,7 @@ What has been verified, and what has not:
 | Examples 04 and 05, `--dry-run` | ✅ Verified | Both exit 0 headless; 04 mirrors a scripted stand-in, 05 walks its scripted targets and keeps the position between them |
 | Example command-line contract | ✅ Verified | `--list-calibrations` exits 0; a non-interactive run with no calibration to use exits 1 and prints the guidance. 2 is left to argparse's own usage errors |
 | Real-hardware motion | ⚠️ **Not verified** | No CAN hardware has been available. The real path is exercised only through `DryRunGripper`, which reports a 2026-09-24 calibration's θ endpoints; the SDK itself has never been driven from this package here |
+| The CAN probe (`ensure_can_link`, `--no-can-setup`) | ⚠️ **Partly verified** | Reading is verified: the parser is pinned against real `ip -details link show` transcripts (including a bus-off one where every flag looks healthy), and `probe_can_link("can0")` was run read-only against a live interface and read it correctly. The **repair** — the `sudo ip` sequence that brings a wrong interface up — has only been exercised against a stand-in `run`; nobody has watched it fix a real interface |
 
 ## Known behaviour
 
