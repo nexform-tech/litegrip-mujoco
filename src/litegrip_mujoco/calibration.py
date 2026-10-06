@@ -400,7 +400,7 @@ def describe_candidate(path: Any) -> str:
 
     tag = ""
     if cal.is_sdk_factory_path:
-        tag = "  ⚠ SDK 出厂标定（本包拒绝使用）"
+        tag = "  ⚠ SDK 出厂标定（本包默认拒绝，需显式 allow_factory=True）"
     elif cal.is_sdk_default_path:
         tag = "  ⚠ SDK 默认路径（未显式指定时本包绝不使用）"
     return f"{cal.describe()}{tag}"
@@ -763,6 +763,7 @@ def apply_calibration(
     path: Any,
     *,
     verify: bool = True,
+    allow_factory: bool = False,
 ) -> Calibration:
     """Load a calibration file into a device and verify it took effect.
 
@@ -782,21 +783,33 @@ def apply_calibration(
         device: The gripper to configure.
         path: The calibration file.
         verify: Whether to run layer 3. Leave this on.
+        allow_factory: Accept the SDK's packaged factory calibration.
+            **Off by default, and it should stay off** unless the caller has
+            no better option. That file is the *test-bench fixture's* measured
+            endpoints, not this gripper's: it is a usable set of defaults, not
+            a calibration of the machine in front of you. Turning this on
+            means layer 2 stops protecting you, so say so where the operator
+            can see it (``examples/_common.open_real_gripper`` prints the
+            path it used for exactly this reason). Only layer 3 still holds:
+            the endpoints in effect are the ones in the factory file.
 
     Returns:
         The validated file that was applied.
 
     Raises:
         CalibrationFileError: The file is invalid, or is the SDK's factory
-            calibration, or the device is simulated.
+            calibration and *allow_factory* is off, or the device is
+            simulated.
         CalibrationVerificationError: The device did not take the values.
     """
     calibration = load_calibration_file(path)
 
-    if calibration.is_sdk_factory_path:
+    if calibration.is_sdk_factory_path and not allow_factory:
         raise CalibrationFileError(
             f"拒绝使用 SDK 自带的出厂标定: {calibration.path}\n"
-            "       它不属于任何一台具体夹爪。请用上位机标定你自己的夹爪。"
+            "       它不属于任何一台具体夹爪。请用上位机标定你自己的夹爪。\n"
+            "       确实要拿它当默认值用（它在台架夹具上量过，能满足闭合位比张开位"
+            "更正的判据），显式传 allow_factory=True，并把这个选择告诉操作员。"
         )
 
     if is_simulated_device(device):
@@ -932,6 +945,7 @@ def require_calibration(
     path: Optional[str] = None,
     *,
     allow_uncalibrated: bool = False,
+    allow_factory: bool = False,
     interactive: bool = True,
     input_fn: Optional[Callable[[str], str]] = None,
     is_tty: Optional[bool] = None,
@@ -947,6 +961,8 @@ def require_calibration(
         device: The gripper.
         path: Calibration file, or ``None`` to ask.
         allow_uncalibrated: Skip the requirement and record the opt-out.
+        allow_factory: Passed through to :func:`apply_calibration`; see there
+            for why you probably want the default.
         interactive: Whether prompting is allowed.
         input_fn: Replacement for :func:`input`, for tests.
         is_tty: Override the terminal check, for tests.
@@ -971,7 +987,7 @@ def require_calibration(
     )
     if chosen is None:
         return applied_calibration(device)
-    return apply_calibration(device, chosen)
+    return apply_calibration(device, chosen, allow_factory=allow_factory)
 
 
 def require_usable_device(device: Any, *, action: str) -> None:

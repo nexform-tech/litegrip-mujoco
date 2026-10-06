@@ -30,6 +30,24 @@
   · 工件是 20×20×30 mm 的方块，落在夹持面中心。夹持碰撞面在 base_link 系中
     z ∈ [0.080941, 0.112529]，y 半宽 11.9595 mm，故 20 mm 见方的工件四周各留
     约 2 mm 余量。对应的闭合位置 q = (87.000-20)/2000 = 0.033500 m。
+
+  ════════════════════════════════════════════════════════════════════════
+  备用工件槽 spawn_box_0..3
+  ════════════════════════════════════════════════════════════════════════
+
+  例程要能"临时放一个工件进去"，但 MuJoCo 的模型是**编译期**的：跑起来之后
+  加不了 body、加不了 geom。所以这里先摆 4 个 20 mm 的方块当槽位，例程用
+  `MujocoGripper.add_box()` 把其中一个挪到想要的位姿。
+
+  ⚠ 槽位在文件里写的是**停放位置**（地板上一排），不是"隐藏"状态 —— 它们一直
+  是真实的、会碰撞的刚体。`add_box()` 是**搬运**而不是**启用**：它直接改写
+  qpos 并重算质量，所以同一个槽位反复使用会丢掉上一次的尺寸和速度。
+
+  ⚠ 键位必须给全。MuJoCo 对 `<key qpos="...">` 里**没写到的自由度补零**，而
+  补零的自由关节意味着"位于世界原点"—— 四个方块会正好卡在夹爪底座里。所以
+  `fixture` 这个键位把 4×7 个自由关节值都写出来了（实测：漏写就是这个后果）。
+  其余键位（`open`/`home`）来自 litegrip.xml，它们不知道槽位的存在，
+  `MujocoGripper` 在应用键位之后会把槽位重新停放一次。
 -->
 <mujoco model="litegrip_scene">
   <include file="litegrip.xml" />
@@ -56,6 +74,38 @@
             condim="4" friction="0.7 0.02 0.0001"
             solimp="0.98 0.999 0.001" solref="0.002 1" />
     </body>
+
+    <!-- 备用工件槽。20 mm 立方体，密度与水同为 1000 kg/m³ → 8 g。
+         停放在地板上（z = -0.08 + 0.01）的一排 2×2，离夹爪够远。
+         接触参数与上面的工件逐字相同，好让放进去的工件表现一致。 -->
+    <body name="spawn_box_0" pos="0.20 0.20 -0.07">
+      <freejoint name="spawn_box_0_free" />
+      <geom name="spawn_box_0_geom" type="box" size="0.010 0.010 0.010"
+            material="mat_object" contype="1" conaffinity="1"
+            condim="4" friction="0.7 0.02 0.0001"
+            solimp="0.98 0.999 0.001" solref="0.002 1" />
+    </body>
+    <body name="spawn_box_1" pos="0.25 0.20 -0.07">
+      <freejoint name="spawn_box_1_free" />
+      <geom name="spawn_box_1_geom" type="box" size="0.010 0.010 0.010"
+            material="mat_object" contype="1" conaffinity="1"
+            condim="4" friction="0.7 0.02 0.0001"
+            solimp="0.98 0.999 0.001" solref="0.002 1" />
+    </body>
+    <body name="spawn_box_2" pos="0.20 0.25 -0.07">
+      <freejoint name="spawn_box_2_free" />
+      <geom name="spawn_box_2_geom" type="box" size="0.010 0.010 0.010"
+            material="mat_object" contype="1" conaffinity="1"
+            condim="4" friction="0.7 0.02 0.0001"
+            solimp="0.98 0.999 0.001" solref="0.002 1" />
+    </body>
+    <body name="spawn_box_3" pos="0.25 0.25 -0.07">
+      <freejoint name="spawn_box_3_free" />
+      <geom name="spawn_box_3_geom" type="box" size="0.010 0.010 0.010"
+            material="mat_object" contype="1" conaffinity="1"
+            condim="4" friction="0.7 0.02 0.0001"
+            solimp="0.98 0.999 0.001" solref="0.002 1" />
+    </body>
   </worldbody>
 
   <!-- 供料夹具。默认 active；例程用 release_fixture() 把它关掉。
@@ -65,7 +115,16 @@
   </equality>
 
   <keyframe>
-    <!-- 指爪张开、工件由夹具托在两指之间：这就是夹具工位的初始状态。 -->
-    <key name="fixture" qpos="0.00001 0.00001 0 0 0.096735 1 0 0 0" />
+    <!-- 指爪张开、工件由夹具托在两指之间：这就是夹具工位的初始状态。
+
+         qpos 的顺序 = 两个指关节 → 工件的自由关节 → 四个槽位的自由关节。
+         四个槽位那 28 个数**必须写出来**：漏写会被补零，等于把它们放到世界
+         原点，也就是夹爪底座里面（见文件头的说明）。 -->
+    <key name="fixture" qpos="0.00001 0.00001
+                                0 0 0.096735 1 0 0 0
+                                0.20 0.20 -0.07 1 0 0 0
+                                0.25 0.20 -0.07 1 0 0 0
+                                0.20 0.25 -0.07 1 0 0 0
+                                0.25 0.25 -0.07 1 0 0 0" />
   </keyframe>
 </mujoco>

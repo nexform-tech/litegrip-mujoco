@@ -277,6 +277,31 @@ So the examples `close()` first, then `release_fixture()`. After that the part h
 alone — which is what makes it a real end-to-end grasp test rather than a torque-derived number.
 `open()` drops it to the floor at `z = -0.065` (floor `-0.08` + half-height 15 mm).
 
+### Spare slots, and what `add_box()` costs
+
+`scene.xml` also carries four parked bodies, `spawn_box_0` … `spawn_box_3`: each is a free joint
+with a single box geom, resting away from the gripper. MuJoCo compiles a model once, so a runtime
+`add_box()` cannot conjure a body — it **moves** a slot to `pos` (by default `grasp_center()`,
+between the jaws) and rewrites its size. `box_slots()` lists the names; `litegrip.xml` has none,
+and asking it for a slot raises `IndexError`.
+
+- **The slot is moved, not created.** Whatever occupied it — size, mass, velocity — is gone.
+  Reusing a slot overwrites the previous box. `reset()` parks every slot back on the floor.
+- **Resizing needs `mj_setConst`.** MuJoCo derives `body_mass` and `body_inertia` from the geom
+  size at *compile* time and does not notice a runtime change, so `add_box()` writes those two
+  arrays and then calls `mj_setConst(model, data)`.
+- **`mj_setConst` resets `qpos` to `qpos0`.** Measured on MuJoCo 3.11: `qvel`, `ctrl` and `time`
+  are left alone, but every joint position returns to the model's default. Left unhandled, adding
+  a box would quietly put the gripper and the workpiece back at their default pose.
+  `world.spawn_box()` therefore saves `qpos` before the resize and restores it around the
+  `mj_setConst` call; the new box's pose is written *after* the restore, so the two cannot fight.
+
+The read-only half of the same module is cheaper and needs none of this: `link_aabb()` and
+`pad_aabbs()` return world-space boxes for collision geoms, `contacts()` resolves contact names
+and forces, and `grasp_center()` returns the midpoint between the two finger pads. Those AABBs
+are the **collision** boxes, deliberately coarse — never read the jaw opening from one. Use
+`gap_mm()`.
+
 ## The viewer and the threading model
 
 The physics runs in a background thread (`litegrip_sim`) started by `connect()`. One RLock guards
@@ -299,6 +324,32 @@ outside it races them — the same disease as rule 1. `litearm-mujoco` does it t
 closes the viewer **only if the thread actually exited**. If the join times out the thread may be
 wedged inside `sync()`, and closing the window under it races for `MjData`. Better to leak a
 window into process teardown than to segfault there.
+
+**4. The key callback runs on the viewer's thread and may only enqueue.** `launch_passive()`
+invokes `key_callback` from the viewer's own thread, at a moment when the physics thread is
+inside `mj_step()`. `MujocoGripper._on_key()` therefore does exactly one thing —
+`self._keys.feed(int(keycode))`, an append to a `deque` — and the main thread drains it in its
+own loop with `keyboard_events()`. **Do not** touch `MjData`, open or close the viewer, or print
+from that callback: an exception raised there lands on the viewer's thread, next to MuJoCo's
+internal state, where nothing is watching for it. Reading input is the main thread's job, and
+`pressed()` / `held()` take the list `keyboard_events()` returns.
+
+`key_codes()` resolves the glfw key constants lazily, with a literal fallback when `glfw` cannot
+be imported, so this module still imports with no window, no display and no MuJoCo viewer —
+which is what `--help`, `--headless` and CI need. The callback itself is only offered by MuJoCo
+≥ 3.1: `_accepts_key_callback()` inspects `launch_passive`'s signature rather than trying the
+call and catching `TypeError`, because a `TypeError` from *inside* `launch_passive` would mean
+the window already exists, and retrying would leave an orphan window nobody syncs. On an older
+MuJoCo the window still opens; `keyboard_events()` simply stays empty.
+
+**A closed window is a disconnect.** `_sim_loop()` checks `viewer.is_running()` under the lock on
+every tick. When it goes false the operator has closed the window, so the loop sets `_abort`
+(which wakes a main thread blocked inside `open()` / `close()`) and breaks. It deliberately does
+**not** clear `self._viewer`: closing a window and closing the viewer handle are two different
+things, and detaching the reference here would remove the very evidence `disconnect()` uses to
+decide whether closing the window is safe at all (rule 3). Teardown belongs to `disconnect()`.
+`pump()` is the main thread's view of the same signal: it returns `False` once the connection is
+gone, which is how the examples' resident loops end.
 
 ### What is *not* fixable here
 
@@ -427,9 +478,15 @@ Three layers:
   method, these fail loudly instead of the simulation quietly missing it.
 - **Calibration guard** — `tests/test_calibration.py` covers discovery, validation, the picker,
   the provenance marker and both strict conversions, against a duck-typed `LiteGrip` stand-in
-  whose `load_calibration()` can be told to reproduce the SDK's silent fallback. Examples 04 and
-  05 are also run as subprocesses to pin the command-line contract: `--list-calibrations` exits
-  0, and a non-interactive run without `--calibration` exits 2 with the guidance text.
+  whose `load_calibration()` can be told to reproduce the SDK's silent fallback.
+- **Example command-line contract** — the same file runs examples 04 and 05 as subprocesses:
+  `--list-calibrations` exits 0, a non-interactive run with no calibration to use exits 1 with
+  the guidance text, and `--dry-run` neither asks for a calibration nor fails on a missing SDK.
+  Two environment details matter. `LITEGRIP_CALIB` is set to the case's own home so a developer's
+  calibration cannot answer for it, and `LITEGRIP_SDK_DIR` is pointed at an empty directory
+  (`no_sdk()`) so a developer's own SDK checkout cannot supply the factory calibration either.
+  The resident loops get `--duration`: without it they would run until Esc or a closed window,
+  which in a test means forever.
 
 The suite needs no CAN interface, no hardware and no `litegrip` SDK. Cases that want the SDK skip
 themselves when it is absent.

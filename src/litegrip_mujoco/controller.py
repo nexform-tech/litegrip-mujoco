@@ -29,7 +29,7 @@ MJCF 的 ``<position>`` 内建伺服只接受固定的 ``kp``，无法逐次调�
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -87,6 +87,20 @@ class GripperPDController:
             self.kp = float(kp)
         if kd is not None:
             self.kd = float(kd)
+
+    def set_torque_limit(self, tau_max: float) -> None:
+        """运行时改输出限幅 (Nm)。``compute()`` 里的 ``np.clip`` 用的就是它。
+
+        用途是给一条运动加上**力上限**：``command_fraction(force_n=…)`` 把限幅
+        压到 ``n_to_nm(force_n)``，运动照常走斜坡，但电机顶多出这么多力。
+
+        ⚠ 这不是真正的力控。位置环还在，误差大时输出会贴着这个上限饱和 ——
+        想要"夹住就不动了"，那要靠 ``grasp()`` 的堵转检测把目标改写到当前位置，
+        见 :meth:`MujocoGripper.grasp`。限幅只是给撞上东西那一下兜个底。
+
+        传 ``None`` 或负数表示恢复结构上限 :data:`constants.TAU_MAX`。
+        """
+        self.tau_max = TAU_MAX if tau_max is None else max(0.0, float(tau_max))
 
     def reset(self) -> None:
         """目标归零、前馈清零。"""
@@ -251,6 +265,81 @@ class Hold:
 
     def advance(self, dt: float) -> Tuple[float, float]:
         return self._value, 0.0
+
+
+class TrajectoryRamp:
+    """把一条**录好的轨迹**当作随时间变化的目标（回放用）。
+
+    与 :class:`Ramp` 的子孙不同，它不走"从起点到终点"那条路：整条曲线事先就
+    定好了，每一拍只是去查曲线在**当前时刻**的值。所以它没有 ``finish()`` ——
+    "跳到终点"对一条轨迹没有意义。
+
+    轨迹存的是**无量纲开度**（``openness``），不是电机角。查出来的开度由调用方
+    给的 ``to_theta`` 换算成 θ —— 这样同一条轨迹在仿真和真机上都能放，各自按
+    自己的标定端点换算。这正是 03 那条例程能"录一次、两边重现"的原因。
+
+    它只依赖 ``trajectory`` 的两个成员（``duration`` 与 ``openness_at(t)``），
+    所以不 import trajectory 模块，也就没有循环依赖。
+    """
+
+    def __init__(
+        self,
+        trajectory: Any,
+        *,
+        speed: float = 1.0,
+        loop: bool = False,
+        to_theta: Callable[[float], float],
+        eps: float = 1e-3,
+    ) -> None:
+        self._traj = trajectory
+        self._speed = max(abs(float(speed)), 1e-9)
+        self._loop = bool(loop)
+        self._to_theta = to_theta
+        self._eps = max(float(eps), 1e-6)
+        self._t = 0.0
+        self._duration = max(float(trajectory.duration), 0.0)
+
+    @property
+    def done(self) -> bool:
+        """``loop=True`` 时恒为 False —— 它永远不会走完。"""
+        return False if self._loop else self._t >= self._duration
+
+    @property
+    def goal(self) -> float:
+        """当前时刻的目标 θ (rad)。"""
+        return self._theta_at(self._t)
+
+    @property
+    def elapsed(self) -> float:
+        """已经走过的**轨迹时间** (s)，不是墙上时间。"""
+        return self._t
+
+    def _theta_at(self, t: float) -> float:
+        return float(self._to_theta(self._traj.openness_at(t)))
+
+    def advance(self, dt: float) -> Tuple[float, float]:
+        """推进 dt，返回 (目标 θ, 目标角速度前馈)。
+
+        角速度用中心差分的**单边**形式 ``(θ(t+ε) − θ(t)) / ε`` 算。用真的解析
+        导数是不行的：轨迹是采样点，没有导数；而两点的差商在采样间隔（100 Hz
+        录制、1 ms 物理步）下足够平滑，做前馈够用。
+        """
+        self._t += dt * self._speed
+        if self._loop:
+            if self._duration > 0.0:
+                self._t %= self._duration
+        elif self._t >= self._duration:
+            self._t = self._duration
+        theta = self._theta_at(self._t)
+        dtheta = (self._theta_at(self._t + self._eps) - theta) / self._eps
+        return theta, dtheta
+
+    def __repr__(self) -> str:
+        return (
+            f"TrajectoryRamp(samples={len(self._traj)}, "
+            f"speed={self._speed:g}, loop={self._loop}, "
+            f"t={self._t:.3f}/{self._duration:.3f})"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════

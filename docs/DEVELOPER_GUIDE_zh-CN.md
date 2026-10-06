@@ -256,6 +256,28 @@ ctrl = kp·(θ_des − θ) + kd·(−θ̇) + τ_ff
 这才使它成为真正的端到端抓取验证，而不是一个由力矩推算出来的数字。
 `open()` 会让它掉到 `z = -0.065`（地板 `-0.08` + 半高 15 mm）。
 
+### 备用槽位，以及 `add_box()` 的代价
+
+`scene.xml` 里还停着四个方块：`spawn_box_0` … `spawn_box_3`，各是一个 freejoint 加一个
+box geom，停在离夹爪很远的地方。MuJoCo 的模型只编译一次，所以运行期的 `add_box()`
+变不出新的 body —— 它是把某个槽位**搬**到 `pos`（默认 `grasp_center()`，也就是两指
+之间），再改它的尺寸。`box_slots()` 给名字；`litegrip.xml` 一个槽位都没有，向它要槽位
+会抛 `IndexError`。
+
+- **是搬运，不是新建。** 槽位里原先的东西 —— 尺寸、质量、速度 —— 全没了。反复用同一个
+  槽位就是覆盖上一个方块。`reset()` 会把所有槽位放回地板上的停放位。
+- **改尺寸必须走 `mj_setConst`。** MuJoCo 的 `body_mass` 和 `body_inertia` 是**编译期**
+  由 geom 尺寸算出来的，运行期改了它不会自己发现，所以 `add_box()` 写完这两个数组之后
+  要调一次 `mj_setConst(model, data)`。
+- **`mj_setConst` 会把 `qpos` 复位成 `qpos0`。** 在 MuJoCo 3.11 上实测：`qvel`、`ctrl`
+  和 `time` 不动，但每个关节位置都回到模型默认值。不管它的话，每加一个方块就会悄悄把
+  夹爪和工件摆回默认位姿。所以 `world.spawn_box()` 在改尺寸之前先存一份 `qpos`，围绕
+  `mj_setConst` 那次调用恢复回来；新方块的位姿是在恢复**之后**写的，两者不会打架。
+
+同一个模块只读的那一半便宜得多，什么都不用操心：`link_aabb()` 和 `pad_aabbs()` 给碰撞
+geom 的世界系包围盒，`contacts()` 把接触点的名字和力解析好，`grasp_center()` 给两个指面
+的中点。那些包围盒是**碰撞**盒、刻意做得粗 —— 钳口开度绝不能从它读，用 `gap_mm()`。
+
 ## 查看器与线程模型
 
 物理跑在 `connect()` 起的后台线程（`litegrip_sim`）里，一把 RLock 守着对 `MjData` 的每一次
@@ -275,6 +297,28 @@ arena，`mj_makeConstraint` 无法扩容，于是报
 **3. 仿真线程还活着时不要关查看器。** `disconnect()` 先置 `_running = False`，再把查看器摘下来
 （循环就拿不到了），然后 join 线程，**只有线程确实退出才关窗**。join 超时说明它可能正卡在
 `sync()` 里，此时关窗会和它抢 `MjData`。宁可把窗口漏给进程退出，也不要在这里段错误。
+
+**4. 按键回调跑在查看器自己的线程里，它只能往队列里塞。** `launch_passive()` 是在查看器
+线程里调 `key_callback` 的，而那一刻物理线程正在 `mj_step()` 里。所以
+`MujocoGripper._on_key()` 只做一件事：`self._keys.feed(int(keycode))`，往一个 `deque`
+里 append；主线程在自己的循环里用 `keyboard_events()` 取走。**别**在那个回调里碰
+`MjData`、别开关窗口、别打印 —— 回调里抛出的异常会堆在查看器线程上，紧挨着 MuJoCo 的
+内部状态，而那里没有任何人在看着。读输入是主线程的事，`pressed()` / `held()` 吃的是
+`keyboard_events()` 返回的那张表。
+
+`key_codes()` 惰性解析 glfw 的按键常量，import 不到 `glfw` 时退回字面量，所以这个模块
+在没窗口、没显示、没查看器的环境里照样能 import —— `--help`、`--headless`、CI 要的就是
+这个。回调本身只有 MuJoCo ≥ 3.1 才收：`_accepts_key_callback()` 查的是 `launch_passive`
+的签名，而不是「先调一次、TypeError 就退回两参数版」——后者看着简单，但 `TypeError`
+也可能来自 `launch_passive` **内部**，那时窗口已经建好了，重试会在屏幕上多留一个没人
+sync 的孤儿窗口。老版本 MuJoCo 上窗口照开，只是 `keyboard_events()` 永远为空。
+
+**窗口被关掉 = 断开。** `_sim_loop()` 每一拍都在锁里查一次 `viewer.is_running()`；它变
+成 false 就说明操作者把窗口关了，于是循环置上 `_abort`（阻塞在 `open()` / `close()` 里的
+主线程会因此醒过来）并退出。它**刻意不清** `self._viewer`：关窗口和关查看器句柄是两件
+事，把引用摘掉就等于销毁了 `disconnect()` 判断「现在关窗安不安全」的唯一依据
+（规则 3）。收尾统一交给 `disconnect()`。`pump()` 是主线程看到的同一个信号：连接没了它
+就返回 `False`，例程里的常驻循环就是这么结束的。
 
 ### 这里管不了的部分
 
@@ -394,8 +438,13 @@ python -m pytest tests/ -v
   字段、多一个错误码、多一个方法，它会响亮地失败，而不是让仿真悄悄缺一块。
 - **标定闸** —— `tests/test_calibration.py` 覆盖发现、校验、选择器、来源标记与两个严格
   换算，对象是一个鸭子类型的 `LiteGrip` 替身，可以让它的 `load_calibration()` 复现 SDK
-  的静默回落。例程 04/05 另外以子进程方式跑，钉住命令行契约：`--list-calibrations`
-  退出码 0；非交互且不给 `--calibration` 时退出码 2 并打印指引。
+  的静默回落。
+- **例程命令行契约** —— 同一个文件把例程 04/05 当子进程跑：`--list-calibrations` 退出码
+  0；非交互且没有可用标定时退出码 1 并打印指引；`--dry-run` 既不问标定，也不会因为缺
+  SDK 而失败。这里有两个环境细节是必须的：`LITEGRIP_CALIB` 指向用例自己的 home，免得
+  开发者自己的标定替它作答；`LITEGRIP_SDK_DIR` 指向一个空目录（`no_sdk()`），免得
+  开发者自己的 SDK 检出把出厂标定递过来。常驻循环都带 `--duration`：不带的话它们会一直
+  跑到 Esc 或关窗，在测试里就是永远。
 
 测试套件不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。需要 SDK 的用例在
 SDK 缺席时自行 skip。

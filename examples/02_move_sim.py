@@ -1,214 +1,213 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""样例 02 · 仿真内运动 — 位置 / 速度 / 力的各种控制方式（不需要任何硬件）
+"""样例 02 · 仿真运动 — 速度受限的全行程开合，以及按归一化开度定位
 
-分两段跑，因为**力的数字只在夹住东西时才有意义**：
-
-  第一段  纯夹爪模型（litegrip.xml），没有工件 → 位置、速度、以及
-          ``close(force_n=…)`` 为什么限不住力
-  第二段  演示场景（scene.xml），工件由夹具托在两指之间 → 抓取、力控，
-          并用"松开夹具后工件掉不掉"来验证抓取是否真的成立
+不用真机、不碰 CAN：命令 → 手指按额定速度走 → settle() 等它到位，全在 MuJoCo 里。
+想让夹爪自己走一段你自己拖出来的动作，继续看 examples/03_trajectory.py。
 
 演示:
-  open() / close()              位置控制（min-jerk 目标斜坡）
-  goto(mm)                      绝对位置
-  move_at_speed(mm, mm/s)       恒速运动
-  grasp(N)                      自适应抓取：先合拢到堵转，再保持夹持力
-  set_force(N)                  在当前位置施加夹持力（真·力控）
-  release_fixture() / hold_fixture()
-
-⚠ 关于力控的三条已知语义（仿真与真机一致，不是仿真缺陷）：
-  1. ``close(force_n=…)`` **无法限力**。目标一路指向闭合位，位置误差 kp·Δθ 会
-     压倒前馈力矩并让执行器饱和。实测空夹时 force_n=0/10/20 给出同一个结果。
-     要力控就用 ``grasp()`` 或 ``set_force()``。
-  2. ``grasp(force_n)`` 的实际夹持力会**略大于**请求值。堵转确认窗口（5×10 ms）
-     里指爪还在往前走，目标被改写到窗口末尾的位置，于是留下一段固定位置误差。
-     实测 10 N 请求 → 15.51 N（20 mm 方块）。力对 force_n 仍单调，可当带偏置的
-     开环力控用。详见 assets/litegrip.xml 头部的标定表。
-  3. 同理，``set_force()`` / ``get_force()`` 在**没有夹住任何东西**时没有意义 ——
-     那是指爪顶着硬限位，位置环在跟一个推不动的目标较劲。只有夹稳之后，
-     目标=当前位置、位置误差归零，力矩才真的等于请求值。
-
-前置（只做一次 · 在仓库根目录）:
-  pip install -e ".[dev]"     # 本包是 src 布局，不装就 import 不到
+  sim.command_fraction(fraction, force_n=, velocity_m_s=)  命令一个开度（立即返回）
+  sim.settle()                    等手指真的到目标，返回 (用时, 是否到位)
+  sim.frac_open() / sim.gap_mm()  读回实测开度
+  sim.status_text() / sim.pump()  窗口里刷状态、推进仿真
 
 运行:
-  python3 examples/02_move_sim.py
-  python3 examples/02_move_sim.py --no-render
+  python3 examples/02_move_sim.py                       # 开窗口跑两段演示
+  python3 examples/02_move_sim.py --headless            # 无窗口（跑得快，exit 0）
+  python3 examples/02_move_sim.py --speed 0.02          # 慢速收爪（约 2 s 全行程）
+  python3 examples/02_move_sim.py --force 20            # 20 N 夹持力上限
+  python3 examples/02_move_sim.py --scene               # 用场景模型，多加一段夹工件
 """
 import argparse
-import time
+import sys
 
-from litegrip_mujoco import MujocoGripper
+from _common import (  # noqa: I001  (必须先于 litegrip_mujoco)
+    MAX_GRIP_FORCE_N,
+    add_common_args,
+    make_sim,
+    status_line,
+)
+
+from litegrip_mujoco import QUIT_KEYS, constants as C, pressed
 
 
-def hdr(text):
-    print(f"\n{'─' * 62}\n{text}\n{'─' * 62}")
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="样例 02 · 仿真运动：速度受限的开合与按开度定位（不接真机）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_common_args(ap)
+    ap.add_argument("--force", type=float, default=10.0,
+                    help=f"夹持力上限 [N]（默认 10，上限 {MAX_GRIP_FORCE_N:g}）")
+    ap.add_argument("--speed", type=float, default=C.DEFAULT_VELOCITY_M_S,
+                    help=f"手指速度 [m/s]（默认 {C.DEFAULT_VELOCITY_M_S:.5f}，"
+                         f"即真机的 85 mm/s）")
+    ap.add_argument("--scene", action="store_true",
+                    help="用 scene.xml（带台面、夹具和工件）跑，追加一段夹工件的演示")
+    return ap.parse_args()
 
 
-def open_sim(model, no_render):
-    """连一台仿真；开不出窗口就退回无窗口。
+def show(sim, label: str = "仿真", *, force: bool = True) -> None:
+    print(status_line(
+        label,
+        fraction=sim.frac_open(),
+        aperture_mm=sim.gap_mm(),
+        force_n=sim.get_force() if force else None,
+    ))
 
-    构造必须在 try 里面 —— ``render=True`` 时查看器就是在构造函数里开的。
+
+def demo_travel(sim, args: argparse.Namespace) -> None:
+    """全行程开合——顺便量一下速度受不受限。"""
+    print("\n[1] 全行程开合（速度受限）")
+    for target, name in ((0.0, "闭合"), (1.0, "张开")):
+        sim.command_fraction(target, force_n=args.force, velocity_m_s=args.speed)
+        spent, reached = sim.settle()
+        flag = "到位" if reached else "没到位（被顶住了）"
+        print(f"   → {name}：用掉 {spent:.3f} s 仿真时间 · {flag}")
+        show(sim)
+    print(f"   单指行程 {C.STROKE * 1000:.2f} mm · 单指速度 {args.speed * 1000:.2f} mm/s"
+          f" → 期望单程 ≈ {C.STROKE / args.speed:.2f} s")
+    print(f"   两个手指对冲，所以开口变化的速度是这个的两倍："
+          f"{args.speed * 2000:.1f} mm/s（真机规格 85 mm/s）")
+
+
+def demo_midpoint(sim, args: argparse.Namespace) -> None:
+    """按归一化开度走到中间位——这是仿真和真机共用的「同一种语言」。"""
+    print("\n[2] 走到中间位（归一化开度）")
+    for fraction in (0.5, 0.25, 0.75):
+        sim.command_fraction(fraction, force_n=args.force, velocity_m_s=args.speed)
+        spent, reached = sim.settle()
+        got = sim.frac_open()
+        print(f"   命令 {fraction * 100:5.1f}% → 实测 {got * 100:5.1f}% · "
+              f"开口 {sim.gap_mm():5.2f} mm · {spent:.3f} s · "
+              f"{'到位' if reached else '没到位'}")
+    sim.command_fraction(1.0)
+    sim.settle()
+
+
+def demo_grasp(sim, args: argparse.Namespace) -> None:
+    """场景模型里夹住一个工件——这段讲清楚「力上限」和「力控」不是一回事。
+
+    现场顺序是有讲究的，两步都不能省：
+
+    * ``release_fixture()`` 让场景自带的那个工件先落到地板上。夹爪是**固定安装**
+      的，两指之间的东西只会自由落体——不腾空这块地方，新方块一放进去就被旧工件
+      挤住。
+    * 合拢必须**快**。方块放进指间就开始掉，慢吞吞地合拢会看着它滑出去。所以这
+      一段用 :meth:`~litegrip_mujoco.MujocoGripper.grasp`（恒定目标 + 堵转检测，
+      没有限速斜坡），而不是 ``command_fraction``。
+
+    要讲的两件事：
+
+    * ``command_fraction(force_n=)`` 的 ``force_n`` 是**出力上限**，不是力控。
+      位置环还在，目标一路指向闭合位时 ``kp·Δθ`` 会压倒前馈力矩并让输出饱和——
+      实测 ``force_n=0 / 10 / 20`` 拿到的接触力是一样的。``grasp()`` 才是力控：
+      检测到堵转后把目标改写到当前位置，位置误差归零，只剩前馈力矩。
+    * ``get_force()`` 是**电机侧**的力（``GEAR × tau``），接触力是**指面侧**的，
+      两者口径不同，夹住时数值也不相等。
     """
+    print("\n[3] 夹住一个工件（仅 --scene 有）")
+    sim.reset("fixture")
+    sim.settle(0.05)
+    sim.release_fixture()
+    sim.settle(1.0)
+    name = sim.add_box(0, size=(0.010, 0.010, 0.015))
+    print(f"   已把 {name} 搬到指间（20 × 20 × 30 mm）")
+
+    reached = sim.grasp(force_n=args.force, duration=1.0)
+    print(f"   grasp(force_n={args.force:.1f}) → "
+          f"{'检测到堵转，已转为力保持' if reached else '超时，没夹住'}")
+    show(sim)
+    print(f"   开口停在 {sim.gap_mm():.2f} mm，而不是闭合的 "
+          f"{C.GAP_CLOSED_MM:.2f} mm → 指面压在了工件上")
+    print(f"   方块 20 mm 宽，指面间距 {sim.gap_mm():.2f} mm → 压进去 "
+          f"{20.0 - sim.gap_mm():.3f} mm（接触刚度有限，不是穿模）")
+
+    # 指面侧与电机侧应当对得上：静止夹持时两指的接触力就是电机推出来的力。
+    # 左右分开算，因为摩擦会让两侧不等。
+    for side in ("left", "right"):
+        points = [c for c in sim.contacts(only=("spawn_box_0",))
+                  if side in (c.geom1 + c.geom2)]
+        total = sum(c.force_n for c in points)
+        print(f"   {side:5s} 指面侧 {total:5.2f} N（{len(points)} 个接触点，"
+              f"接触是面不是点）")
+    print(f"   get_force() 报 {sim.get_force():5.2f} N（由电机力矩推算，与指面侧"
+          f"对得上）")
+    print(f"   但它不是请求的 {args.force:.1f} N：grasp() 只把前馈力矩设成 "
+          f"{args.force:.1f} N，")
+    print(f"   位置环仍然接着，工件回弹让目标位与实测位差出一点角度，kp·Δθ 就加到"
+          f"了前馈上，")
+    print(f"   实测超了 {sim.get_force() - args.force:.1f} N。force_n=0 时更明显："
+          f"本场景下实测仍报 6.2 N。")
+    print("   所以 grasp() 的 force_n 是前馈基准，不是夹持力的闭环设定值。")
+    print("   真机上是否同样超调，本机没有 CAN 硬件，未经验证。")
+
+    sim.open()
+    sim.settle(1.0)
+    print("   张开后工件留在原处（本仓不做抓取规划，只演示力与接触）")
+
+
+def interactive(sim) -> None:
+    """有窗口时：实时刷状态，Esc/Q 或关窗退出。"""
+    if not sim.gui:
+        return
+    print("\n[4] 实时状态（Esc / Q 退出）")
+    while sim.connected():
+        if pressed(sim.keyboard_events(), QUIT_KEYS):
+            print("\n   收到退出键")
+            break
+        line = status_line(
+            "仿真",
+            fraction=sim.frac_open(),
+            aperture_mm=sim.gap_mm(),
+            force_n=sim.get_force(),
+        )
+        print(line, end="\r")
+        sim.status_text([
+            f"开度 {sim.frac_open() * 100:5.1f}%  "
+            f"开口 {sim.gap_mm():5.2f} mm  "
+            f"力 {sim.get_force():5.2f} N"
+        ])
+        if not sim.pump():
+            break
+    print()
+
+
+def main() -> int:
+    args = parse_args()
+    args.force = max(0.0, min(MAX_GRIP_FORCE_N, args.force))
+    if args.speed <= 0.0:
+        # 限速是斜坡的时间尺度，0 或负数会让斜坡永远走不完（除零）。
+        print(f"--speed 必须为正，收到 {args.speed}；改用默认 "
+              f"{C.DEFAULT_VELOCITY_M_S:.5f} m/s")
+        args.speed = C.DEFAULT_VELOCITY_M_S
+
+    print("样例 02 · 仿真运动（不接真机，不会动真机）")
+    sim = make_sim(args.headless, model_path="scene.xml" if args.scene else None)
     try:
-        gripper = MujocoGripper(model_path=model, render=not no_render)
-        gripper.connect()
-    except RuntimeError as exc:
-        print(f"  [警告] {exc} → 改为无窗口运行")
-        gripper = MujocoGripper(model_path=model, render=False)
-        gripper.connect()
-    gripper.enable()
-    return gripper
+        print(f"   MJCF      {sim.model_path}")
+        print(f"   指关节    {sim.model.nu} 个受驱动器驱动的移动副")
+        print(f"   初始状态  {sim.frac_open() * 100:.1f}% · "
+              f"开口 {sim.gap_mm():.2f} mm")
+        # 和真机一样，不使能就一条运动指令都发不出去。仿真里没有硬件的风险，
+        # 但这个门是刻意保留的——这样同一段控制代码在仿真和真机上的
+        # 前置条件完全一致（真机上忘了 enable() 是最常见的一次「怎么不动」）。
+        sim.enable()
+        sim.focus_camera()
 
+        demo_travel(sim, args)
+        demo_midpoint(sim, args)
+        if args.scene:
+            demo_grasp(sim, args)
+        show(sim)
 
-# ══════════════════════════════════════════════════════════════════════════
-# 第一段：纯夹爪模型，没有工件
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def kinematics(g):
-    hdr("[1] 位置控制 open() / close()")
-    for label, fn in (("open", g.open), ("close", g.close)):
-        t0 = time.monotonic()
-        fn(duration=1.0)
-        print(f"  {label:6s} 用时 {time.monotonic() - t0:.2f}s"
-              f"  行程 {g.get_position():7.3f} mm"
-              f"  开口 {g.gap_mm():7.3f} mm")
-
-    hdr("[2] 绝对位置 goto(mm) —— 0 = 闭合，85.452 = 全开")
-    for mm in (0.0, 20.0, 42.726, 85.452):
-        g.goto(mm, duration=0.6)
-        print(f"  goto({mm:7.3f}) → 行程 {g.get_position():7.3f} mm"
-              f"  开口 {g.gap_mm():7.3f} mm")
-
-    hdr("[3] 速度控制 move_at_speed(mm, mm/s)")
-    for speed in (80.0, 20.0):
-        g.goto(85.452, duration=0.8)
-        g.settle(0.2)
-        start = g.get_position()
-        t0 = time.monotonic()
-        g.move_at_speed(0.0, speed_mm_s=speed)
-        dt = time.monotonic() - t0
-        travelled = start - g.get_position()
-        print(f"  目标 {speed:5.1f} mm/s：走完 {travelled:7.3f} mm"
-              f" 用时 {dt:.2f}s  → 实测均速 {travelled / dt:6.1f} mm/s")
-
-    print("\n  空夹（两指之间什么都没有）时 get_force() 的读数是没意义的 ——")
-    print("  指爪顶在硬限位上，位置误差被限位吃掉，只剩前馈分量。")
-    print("  力的数字只有在夹住东西之后才作数，见第二段 [4]/[6]。")
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# 第二段：演示场景，工件由夹具托在两指之间
-# ══════════════════════════════════════════════════════════════════════════
-
-
-def grasping(g):
-    obj = g.model.body("object").id
-
-    hdr("[4] close(force_n=…) 为什么限不住力 —— 拿工件当靶子")
-    print("  目标一路指向闭合位，指爪停在工件表面时留下约 9 mm 的位置误差，")
-    print("  kp·Δθ 远大于前馈 n_to_nm(force_n)，执行器直接饱和到 ±TAU_MAX：\n")
-    for n in (0.0, 5.0, 10.0, 20.0):
-        g.reset("fixture")
-        g.settle(0.2)
-        g.close(force_n=n, duration=1.0)
-        print(f"  close(force_n={n:5.1f}) → {g.get_force():7.3f} N"
-              f"   （力矩 {g.get_torque():+7.4f} Nm，开口 {g.gap_mm():7.3f} mm）")
-    print("\n  请求 0 N 却给了 100 N。对照 grasp()：")
-    for n in (5.0, 10.0, 20.0):
-        g.reset("fixture")
-        g.settle(0.2)
-        g.grasp(force_n=n, duration=3.0)
-        print(f"  grasp(force_n={n:5.1f}) → {g.get_force():7.3f} N"
-              f"   （力矩 {g.get_torque():+7.4f} Nm，开口 {g.gap_mm():7.3f} mm）")
-    print("\n  → 差别在于 grasp() 检测到堵转后把目标**改写到当前位置**，位置误差")
-    print("    归零，关节力只剩前馈 GEAR·tau_ff = force_n。这是整个力模型的")
-    print("    承重细节：力控 = 位置误差归零 + 力矩前馈，缺一不可。")
-
-    hdr("[5] 抓取 grasp(N) —— 用焊死的工件验证抓取是否真的成立")
-    print("  工件由 <weld> 夹具托在两指之间。先夹紧、再解除夹具，之后工件")
-    print("  **只靠摩擦**留在指间 —— 这才是对夹持力的真实验证。\n")
-
-    g.reset("fixture")
-    g.settle(0.3)
-    z0 = float(g.data.xpos[obj][2])
-    print(f"  [初始] 工件 z = {z0 * 1000:.3f} mm（夹具托住，指爪张开）")
-
-    for n in (5.0, 10.0, 20.0):
-        g.reset("fixture")
-        g.settle(0.2)
-
-        t0 = time.monotonic()
-        ok = g.grasp(force_n=n, duration=3.0)
-        dt = time.monotonic() - t0
-        f_meas, gap = g.get_force(), g.gap_mm()
-
-        g.release_fixture()
-        g.settle(2.0)
-        dz = (float(g.data.xpos[obj][2]) - z0) * 1000.0
-        held = abs(dz) < 5.0
-
-        print(f"  grasp({n:5.1f} N) → {str(ok):5s} 用时 {dt:.2f}s"
-              f"  开口 {gap:7.3f} mm  夹持力 {f_meas:6.3f} N"
-              f"   松开工件后 z {dz:+.3f} mm → "
-              f"{'✅ 夹住了' if held else '❌ 掉了'}")
-
-    hdr("[6] 力控 set_force(N) —— 必须已经夹稳才成立")
-    g.reset("fixture")
-    g.settle(0.2)
-    g.grasp(force_n=10.0, duration=3.0)
-    # 此刻工件被夹具焊住（很硬），指爪是压在一个刚体上
-    print("  （工件仍被夹具焊住，指爪压在刚体上，接触极硬，读数偏大）")
-    for n in (5.0, 10.0):
-        g.set_force(n, duration=0.6)
-        print(f"  set_force({n:5.1f}) → {g.get_force():7.3f} N")
-
-    g.release_fixture()
-    g.settle(1.0)
-    print("\n  解除夹具后工件只靠摩擦支撑，接触变软，读数才跟着请求值走：")
-    for n in (2.0, 5.0, 10.0, 20.0):
-        g.set_force(n, duration=0.6)
-        print(f"  set_force({n:5.1f}) → {g.get_force():7.3f} N"
-              f"   （力矩 {g.get_torque():+.4f} Nm）")
-
-    hdr("[7] open() → 工件落到地板")
-    g.open(duration=1.0)
-    g.settle(2.0)
-    z = float(g.data.xpos[obj][2]) * 1000.0
-    print(f"  工件 z = {z:.3f} mm"
-          f"   （地板 z=-80 mm + 半高 15 mm = -65 mm 即落稳）")
-    print(f"  is_grasped() = {g.is_grasped()}")
-
-
-def main():
-    ap = argparse.ArgumentParser(description="LiteGrip 夹爪 · 仿真内运动")
-    ap.add_argument("--no-render", action="store_true", help="不开可视化窗口")
-    args = ap.parse_args()
-
-    plain = scene = None
-    try:
-        print("\n【第一段】纯夹爪模型（无工件）")
-        plain = open_sim(None, args.no_render)
-        kinematics(plain)
-        plain.disconnect()
-        plain = None
-
-        print("\n\n【第二段】演示场景（工件 + 夹具）")
-        scene = open_sim("scene.xml", args.no_render)
-        grasping(scene)
-
-        print("\n✅ 完成。全部在仿真内，不需要任何硬件。")
-        print("   下一步：examples/03_trajectory.py 录制并回放轨迹")
-
-    except KeyboardInterrupt:
-        print("\n\n用户中断")
+        interactive(sim)
     finally:
-        for g in (plain, scene):
-            if g is not None:
-                g.disconnect()
+        sim.disconnect()
+    print("\n完成。想把一段手拖的动作录下来重放，继续看 examples/03_trajectory.py"
+          "；真机版本见 examples/05_dual_control.py")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
