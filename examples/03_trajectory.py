@@ -354,6 +354,30 @@ def wait_for_start(sim, keeper):
     return False
 
 
+def wait_for_exit(sim, keeper):
+    """最后一段：喂着保持帧，直到操作员按 Esc / Q 或关掉窗口。返回等没等到键。
+
+    真机此刻仍使能着，所以不能「打印完就 return」——静默约
+    :data:`MEASURED_COMM_LOSS_S` 就锁 0xD，而操作员盯着最后一段读数看多久是不知道
+    的。窗口在的时候这一段由键盘/关窗口结束。
+
+    ``--headless`` 没有窗口，也就**没有按键来源、没人关得了窗口**：等下去是死等，
+    和 :func:`wait_for_start` 同一个理由。所以直接返回。
+    """
+    if not sim.gui:
+        print("   --headless 没有窗口：不等按键，直接退出")
+        return False
+    print("   按 Esc / Q 退出（退出会失能：手指变松、可能因自重滑动）")
+    while sim.connected():
+        if pressed(sim.keyboard_events(), QUIT_KEYS):
+            print("\n   收到退出键")
+            return True
+        feed(keeper)
+        if not sim.pump():
+            break
+    return False
+
+
 def load_trajectory(name):
     """读一段轨迹（纯文件 I/O，不碰 CAN）；读不出来就带着原因退出。
 
@@ -568,14 +592,7 @@ def main():
             print(f"   空档期发了 {keeper.frames} 帧保持帧"
                   "（使能态静默就锁 0xD：本仓实测约 "
                   f"{MEASURED_COMM_LOSS_S:g} s，SDK 文档写约 0.1 s）")
-            print("   按 Esc / Q 退出（退出会失能：手指变松、可能因自重滑动）")
-            while sim.connected():
-                if pressed(sim.keyboard_events(), QUIT_KEYS):
-                    print("\n   收到退出键")
-                    break
-                feed(keeper)
-                if not sim.pump():
-                    break
+            wait_for_exit(sim, keeper)
     except KeyboardInterrupt:
         print("\n用户中断")
     finally:
