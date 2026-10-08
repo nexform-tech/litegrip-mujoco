@@ -12,7 +12,9 @@
   check_sdk_api()     核对 SDK 有没有本仓库依赖的公开接口，缺了就在启动时停下
   add_common_args()   --headless（别名 --no-render）
   add_hardware_args() --channel / --can-id / --mst-id / --calib（别名
-                      --calibration）/ --list-calibrations
+                      --calibration）/ --list-calibrations / --no-can-setup
+  ensure_can_link()  连接之前探测 CAN 接口；状态不对才用 sudo 把它拉起来
+                     （照上位机 litegrip-studio 的流程；--no-can-setup 可关掉）
   choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定 → SDK 出厂
                       标定 → 两个都没有才当场从候选里选
   open_real_gripper() 选标定 → 连接 → 载入并核实标定 → 使能，失败时给出可读的提示
@@ -35,9 +37,14 @@
 自己的那份：上位机 ``litegrip-studio`` / ``litegrip-console`` 标定后保存，或
 SDK 自带的 ``tools/gui/litegrip_gui.py``。
 
-真机跑之前确认 CAN 已配置好：
+真机跑之前确认 CAN 已配置好。这一步**不用你手动做**：三个真机样例在连接前会探测
+接口，只在它真的不对时（没 up / 比特率不对 / 控制器 BUS-OFF）才用 sudo 配一次，
+已经对了就一条命令都不跑、也不问密码——见 :func:`ensure_can_link`。想自己管接口
+就加 ``--no-can-setup``。手动那条命令是：
 
-    sudo ip link set can0 up type can bitrate 1000000
+    sudo ip link set can0 down
+    sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+    sudo ip link set can0 up
 
 与 pybullet 那套样例的关系
 --------------------------
@@ -56,12 +63,26 @@ SDK 自带的 ``tools/gui/litegrip_gui.py``。
 from __future__ import annotations
 
 import argparse
+import errno
 import os
+import re
+import shutil
+import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
 __all__ = [
+    "CAN_BITRATE",
+    "CAN_BUS_OFF",
+    "CAN_CHANNEL",
+    "CAN_DEVICE_RE",
+    "CAN_ERROR_ACTIVE",
+    "CAN_PROBE_TIMEOUT_S",
+    "CAN_RESTART_MS",
+    "CAN_SETUP_TIMEOUT_S",
+    "CanLinkState",
     "FRESH_WAIT_S",
     "MAX_GRIP_FORCE_N",
     "RATED_SPEED_MM_S",
@@ -72,11 +93,15 @@ __all__ = [
     "add_common_args",
     "add_hardware_args",
     "bootstrap_src",
+    "can_link_failure",
     "check_calibration",
     "check_calibration_matches_args",
     "check_calibration_values",
     "check_sdk_api",
     "choose_calibration_file",
+    "connect_failure_message",
+    "enable_failure_message",
+    "ensure_can_link",
     "ensure_deps",
     "factory_calibration_path",
     "fraction_to_gap_mm",
@@ -85,8 +110,11 @@ __all__ = [
     "import_litegrip",
     "list_calibrations",
     "make_sim",
+    "manual_can_hint",
     "missing_sdk_api",
     "open_real_gripper",
+    "parse_can_link",
+    "probe_can_link",
     "rad_to_fraction",
     "sdk_dir",
     "status_line",
@@ -390,10 +418,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_hardware_args(parser: argparse.ArgumentParser) -> None:
-    """加真机连接参数 ``--channel`` / ``--can-id`` / ``--mst-id`` / ``--calib``。"""
+    """加真机连接参数 ``--channel`` / ``--can-id`` / ``--mst-id`` / ``--calib``
+    / ``--no-can-setup``。"""
     parser.add_argument(
-        "--channel", default="can0",
-        help="SocketCAN 接口名（默认 can0）",
+        "--channel", default=CAN_CHANNEL,
+        help=f"SocketCAN 接口名（默认 {CAN_CHANNEL}）",
     )
     parser.add_argument(
         "--can-id", default=0x08, type=lambda s: int(s, 0),
@@ -414,6 +443,10 @@ def add_hardware_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--list-calibrations", action="store_true",
         help="列出候选标定文件及其端点后退出（不连真机、不发帧）",
+    )
+    parser.add_argument(
+        "--no-can-setup", action="store_true",
+        help="不自动准备 CAN 口：接口由你自己管，连接前不再探测、也不弹 sudo 密码",
     )
 
 
@@ -843,13 +876,371 @@ def fresh_state(gripper, timeout_s: float = FRESH_WAIT_S):
 
 
 # ═════════════════════════════════════════════════════════════════════════
+# CAN 接口：先探测，只在真的不对时才拉起
+# ═════════════════════════════════════════════════════════════════════════
+#
+# 这一段照上位机 litegrip-studio 的 ``can_link.py`` 做，三条规则一样：
+#
+#   1. **便利，不是闸门。** 探测或拉起失败绝不拦住后面的连接尝试——只有那条路
+#      才知道链路到底通不通。
+#   2. **尽量少改。** 先探测；接口已经是 SDK 需要的样子就一条特权命令都不跑，
+#      也就不弹密码。只有真的不对的状态才修。
+#   3. 修不成就**说清楚**，并给出可粘贴的手工命令。
+#
+# 为什么非要读 ``can state``、不能只看标志位：``ENETDOWN``（errno 100，
+# "Network is down"）有**两个**来源。一是接口没 up，看 ``<...UP...>`` 就知道；
+# 二是控制器 **BUS-OFF**——这时 ``ip`` 照样印 ``UP,LOWER_UP``、比特率也正确，
+# **每个标志位都是对的**，但任何一帧都发不出去。真机上撞到的就是这个形状：
+#
+#     enable() 第 1/3 次抛错：HardwareError: 使能失败: [Errno 100] Network is down
+#
+# SDK 是在 ``enable()`` 发**第一帧**时才撞上它的（``connect()`` 只开 socket 和
+# bind，而这两步在 down 的接口上照样成功），于是样例把它译成「夹爪可能处于错误
+# 状态或未上电」——把一个主机侧的链路问题算到了夹爪头上。这里把它翻回来。
+
+#: 真机样例要的总线速率（达妙电机 1 Mbit/s）。
+CAN_BITRATE = 1_000_000
+
+#: 默认接口名（``--channel`` 的默认值）。
+CAN_CHANNEL = "can0"
+
+#: ``restart-ms``：控制器进入 BUS-OFF 后，内核隔多久自动把它拉回总线。
+#: **0 就是「不自动恢复」**，bus-off 会一直锁着直到有人重新配置接口；100 是
+#: SocketCAN 文档推荐值。内核自己的默认值就是 0（本机 can0 现在也印着 0），所以
+#: 一帧坏帧就能把总线锁到下一次有人拉接口为止。
+CAN_RESTART_MS = 100
+
+#: 控制器状态的健康值。``ERROR-PASSIVE`` 只报告不修（总线边际时会出现，它会自己
+#: 恢复）；``BUS-OFF`` 就是上面那个「标志位全对却发不出帧」。
+CAN_ERROR_ACTIVE = "ERROR-ACTIVE"
+CAN_BUS_OFF = "BUS-OFF"
+
+#: 内核会印出来的控制器状态（``drivers/net/can/dev/dev.c`` 里那张 switch 的
+#: 取值）。列全了才好把 ``can state X`` 和上面那行 operstate 分开——operstate 的
+#: 值是 ``UP``/``DOWN``/``UNKNOWN``，一个都不在这里面。
+_CAN_STATES = (
+    CAN_ERROR_ACTIVE, "ERROR-WARNING", "ERROR-PASSIVE", CAN_BUS_OFF,
+    "STOPPED", "SLEEPING",
+)
+
+#: 接口名允许长什么样。它是外部输入里唯一会进命令的一段，所以先卡一道窄的：
+#: 名字只当**参数**交给 `ip`（从不拼进 shell 字符串），但提前拒掉不像接口名的
+#: 东西，能让这条保证不依赖命令是怎么拼出来的。
+CAN_DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,14}$")
+
+#: `ip` 的超时。探测是只读的，5 s 足够；配置在慢机器（或适配器重枚举）上久一点。
+CAN_PROBE_TIMEOUT_S = 5.0
+CAN_SETUP_TIMEOUT_S = 120.0
+
+#: 发不出去帧时内核回的 errno。这三个都指向**主机侧**的链路，与夹爪无关：
+#: ENETDOWN=接口没 up 或控制器 bus-off，ENXIO=适配器没了，ENODEV=接口没了。
+_LINK_ERRNOS = frozenset({errno.ENETDOWN, errno.ENXIO, errno.ENODEV})
+_ERRNO_TEXT = re.compile(r"\[Errno (\d+)\]")
+
+
+@dataclass(frozen=True)
+class CanLinkState:
+    """一次 ``ip -details link show <dev>`` 读出来的接口状态。"""
+
+    exists: bool
+    up: bool = False
+    bitrate: int | None = None
+    fd: bool = False
+    can_state: str = ""
+    is_can: bool = False
+
+    @property
+    def deaf(self) -> bool:
+        """控制器在 BUS-OFF：标志位看不出问题，但一帧都发不出去。"""
+        return self.can_state == CAN_BUS_OFF
+
+    def ready(self, bitrate: int) -> bool:
+        """这就是 SDK 需要的状态吗？是的话什么都不用做。"""
+        return (
+            self.exists
+            and self.is_can
+            and self.up
+            and self.bitrate == bitrate
+            and not self.fd
+            and not self.deaf
+        )
+
+    def describe(self) -> str:
+        if not self.exists:
+            return "不存在"
+        if not self.is_can:
+            return "不是 CAN 接口"
+        if self.bitrate is None:
+            return "已 up，但没配比特率" if self.up else "存在，没配比特率，也没 up"
+        mode = "CAN FD" if self.fd else "经典 CAN"
+        # 非健康状态一直印出来：ERROR-PASSIVE 我们不修，不印就等于没看见。
+        trouble = (
+            f"，控制器 {self.can_state}"
+            if self.can_state and self.can_state != CAN_ERROR_ACTIVE
+            else ""
+        )
+        up = "已 up" if self.up else "未 up"
+        return f"{up}，{mode}，比特率 {self.bitrate}{trouble}"
+
+
+def parse_can_link(text: str, returncode: int = 0) -> CanLinkState:
+    """把 ``ip -details link show`` 的输出读成状态。
+
+    纯函数：``ip`` 的输出长什么样只有这里知道，测试直接喂真机的原文。
+    """
+    if returncode != 0 or "does not exist" in text:
+        return CanLinkState(exists=False)
+    flags = ""
+    start = text.find("<")
+    end = text.find(">", start + 1)
+    if start != -1 and end != -1:
+        flags = text[start + 1:end]
+    bitrate = re.search(r"\bbitrate (\d+)", text)
+    # 按**取值**匹配、不照搬上位机的 ``\bcan state (\S+)``：开了 BERR-REPORTING 的
+    # 接口印的是 ``can <BERR-REPORTING> state BUS-OFF``，中间插了一截，上位机那条
+    # 正则在这台接口上会一个状态都读不到——包括最要命的 BUS-OFF。上面那行
+    # operstate（``state UP``/``DOWN``/``UNKNOWN``）的取值都不在 _CAN_STATES 里，
+    # 所以这样放开也不会读到它。
+    can_state = re.search(r"\bstate (%s)\b" % "|".join(_CAN_STATES), text)
+    return CanLinkState(
+        exists=True,
+        # 按逗号切开再比，**不要**用子串判断：``LOWER_UP`` 里也有 "UP"，一个
+        # ``<NOARP,LOWER_UP>``（管理上没起来）会被子串判成「已 up」。
+        # 也不看后面的 ``state UP``／``state UNKNOWN``：那是 operstate，`lo` 就是
+        # 「管理上 up、operstate 却 UNKNOWN」的那种。
+        up="UP" in flags.split(","),
+        # ``\b`` 是为了不被 CAN FD 那一行 ``dbitrate 2000000`` 骗到（它的标称
+        # 比特率仍是 bitrate 那行的值）。
+        bitrate=int(bitrate.group(1)) if bitrate else None,
+        fd=re.search(r"\bfd on\b", text) is not None,
+        # 读不到就留空——空值不触发任何动作：没印不等于有病。
+        can_state=can_state.group(1) if can_state else "",
+        # ``link/can`` 是 `ip -details` 给 CAN 接口加的那一行，接口还没配过也在。
+        # 有它才说明 --channel 指的是个 CAN 口；不然 ``ensure_can_link`` 会为了一个
+        # 打错的参数对着 eth0 之流 down/up，把网卡停一下。
+        is_can="link/can" in text,
+    )
+
+
+def probe_can_link(channel: str = CAN_CHANNEL, *, run=subprocess.run):
+    """读一次接口状态（只读，不提权）。
+
+    Returns:
+        :class:`CanLinkState`；**探测不出来就返回 ``None``**（没有 ``ip``、命令
+        超时、接口名不像接口名）。``None`` 不是「有病」，是「没结论」，调用方
+        不该据此去动系统——沉默不是故障的证据。
+    """
+    if not CAN_DEVICE_RE.match(channel):
+        return None
+    try:
+        result = run(
+            ["ip", "-details", "link", "show", channel],
+            capture_output=True, text=True, timeout=CAN_PROBE_TIMEOUT_S,
+            # 下面要按英文串分支（``does not exist``），别让操作员的 locale 改掉它。
+            env={**os.environ, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or "") + (result.stderr or "")
+    return parse_can_link(text, result.returncode)
+
+
+def manual_can_hint(channel: str = CAN_CHANNEL, *, bitrate: int = CAN_BITRATE,
+                    restart_ms: int = CAN_RESTART_MS) -> str:
+    """能直接粘进终端的三条命令（加一条查看结果的）。"""
+    configure = f"sudo ip link set {channel} type can bitrate {bitrate}"
+    if restart_ms:
+        configure += f" restart-ms {restart_ms}"
+    configure += " fd off"
+    return "\n     ".join([
+        f"sudo ip link set {channel} down",
+        configure,
+        f"sudo ip link set {channel} up",
+        f"ip -details link show {channel}",
+    ])
+
+
+def _run_ip(argv: list, *, run) -> tuple:
+    """跑一条 ``sudo ip ...``；返回 ``(成功?, 合并后的输出)``。"""
+    try:
+        result = run(["sudo", *argv], capture_output=True, text=True,
+                     timeout=CAN_SETUP_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    text = ((result.stdout or "") + (result.stderr or "")).strip()
+    return result.returncode == 0, text
+
+
+def ensure_can_link(channel: str = CAN_CHANNEL, *, bitrate: int = CAN_BITRATE,
+                    restart_ms: int = CAN_RESTART_MS, repair: bool = True,
+                    run=subprocess.run, which=shutil.which, out=print) -> bool:
+    """连接之前把 CAN 接口准备到 SDK 能用的状态。
+
+    ``repair=False`` 时只探测、只报告，不动系统——05 的 ``--status`` 和 04 的
+    ``--passive`` 走这条：它们的定义就是「只看不动」，而且 ``--status`` 要靠**真实**
+    的接口状态来诊断，替它改掉就把证据抹了。
+
+    Args:
+        channel: 接口名。
+        bitrate: 期望的比特率。
+        restart_ms: ``restart-ms``，0 表示不写这一项。
+        repair: 允许用 sudo 拉起（False = 只报告）。
+        run / which / out: 测试注入用（默认 ``subprocess.run`` / ``shutil.which``
+            / ``print``）。
+
+    Returns:
+        True = 接口现在可用（含「压根探测不出来」，那由后面的连接去判）；
+        False = 明确看到状态不对、而且没能修好（原因和手工命令已经打印过了）。
+    """
+    state = probe_can_link(channel, run=run)
+    if state is None:
+        return True
+    if state.ready(bitrate):
+        return True
+    out(f"   CAN 接口 {channel}：{state.describe()}")
+
+    if not state.exists:
+        # ``exists=False`` 来自 ``ip`` 退出码非 0 或那句 does not exist，所以话只说
+        # 到「读不到」：读不到多半是没有这个接口，但也可能是 `ip` 自己出错了。
+        out(f"   读不到 {channel}（多半是这台机器上没有这个接口）：适配器插好了吗"
+            f"（lsusb 里应看到 gs_usb）？或者用 --channel 指到真正的接口。")
+        return False
+    if not state.is_can:
+        # 这一条是「参数打错了」，不是「接口不对」：对 eth0 做 down/up 只会把网卡
+        # 停一下，而它本来就不是 SDK 要找的东西。
+        out(f"   {channel} 不是 CAN 接口（`ip -details link show {channel}` 里没有 "
+            f"link/can 那一行）。--channel 该给的是 SocketCAN 接口，像 can0。")
+        return False
+    if state.fd:
+        # 不替你改：SDK 自己会按 MTU 适配 FD，而「把一条别的节点也在用的总线
+        # 按猜测改写」不是这里该做的事。
+        out("   接口是 CAN FD。SDK 会自己按 MTU 适配，所以这里不动它——"
+            "要改成经典 CAN 请自己来。")
+        return False
+    if state.deaf:
+        out(f"   控制器在 {CAN_BUS_OFF}：标志位看着都好，但一帧都发不出去。"
+            "先 down 再 up 能把它清掉。")
+    if not repair:
+        out(f"   只探测不拉起（这条路径只看不动）。手动配置：\n     "
+            f"{manual_can_hint(channel, bitrate=bitrate, restart_ms=restart_ms)}")
+        return False
+    if not sys.stdin.isatty():
+        # 管道/CI 里 sudo 要不到密码，会一直挂着。只打印，让它去连。
+        out("   非交互环境（stdin 不是终端），不跑特权命令。手动配置：\n     "
+            f"{manual_can_hint(channel, bitrate=bitrate, restart_ms=restart_ms)}")
+        return False
+    if which("sudo") is None:
+        out("   没有 sudo，没法配置接口。用 root 手动配置：\n     "
+            f"{manual_can_hint(channel, bitrate=bitrate, restart_ms=restart_ms)}")
+        return False
+
+    out(f"   要配置 {channel}（sudo 可能会问密码）。")
+    # 先 down：CAN 的比特率不能在上着的接口上改。
+    ok, text = _run_ip(["ip", "link", "set", channel, "down"], run=run)
+    if not ok:
+        out(f"   down 失败：{text}")
+        return False
+
+    base = ["ip", "link", "set", channel, "type", "can", "bitrate", str(bitrate)]
+    extra = ["restart-ms", str(restart_ms)] if restart_ms else []
+    ok, text = _run_ip([*base, *extra, "fd off"], run=run)
+    if not ok and extra and "restart" in text.lower():
+        # 有些适配器（台架这块 gs_usb 克隆就是）不认 restart-ms。**只重试这一条**、
+        # 且只在错误信息提到 restart 时重试：别的失败一并重试会把「偶发错误」
+        # 变成「静默降级」——接口是起来了，可再也不自动从 bus-off 恢复。
+        out(f"   适配器不认 restart-ms（{text}），去掉它重试一次。")
+        ok, text = _run_ip([*base, "fd off"], run=run)
+    if not ok:
+        out(f"   配置失败：{text}")
+        out(f"   手动配置：\n     "
+            f"{manual_can_hint(channel, bitrate=bitrate, restart_ms=restart_ms)}")
+        return False
+
+    ok, text = _run_ip(["ip", "link", "set", channel, "up"], run=run)
+    if not ok:
+        out(f"   up 失败：{text}")
+        # 适配器丢掉 USB endpoint 表时（up 报 No such file or directory），上位机
+        # 会 modprobe -r/modprobe 重载驱动再配一次。从一个样例脚本里去卸载内核
+        # 模块不成比例，这一条留给上位机；这里只说清楚是什么。
+        out("   如果这条错误里提到 No such file or directory，那是适配器丢了 USB "
+            "端点表：拔插一次适配器，或用上位机 litegrip-studio 连接一次。")
+        return False
+
+    after = probe_can_link(channel, run=run)
+    if after is not None and after.ready(bitrate):
+        out(f"   {channel} 已就绪（{after.describe()}）")
+        return True
+    out(f"   配置命令都成功了，但复查仍然不对："
+        f"{after.describe() if after else '探测不出来'}")
+    out(f"   手动看一下：\n     "
+        f"{manual_can_hint(channel, bitrate=bitrate, restart_ms=restart_ms)}")
+    return False
+
+
+def can_link_failure(exc, channel: str = CAN_CHANNEL, *, run=subprocess.run):
+    """把 SDK 那句「使能失败」翻成主机的链路问题；不是这类错就返回 ``None``。
+
+    ``ENETDOWN``/``ENXIO``/``ENODEV`` 都只说明**帧发不出去**，与夹爪无关——而 SDK
+    是在 ``enable()`` 发第一帧时才撞上它们的，所以看上去像是夹爪没上电。
+    """
+    match = _ERRNO_TEXT.search(str(exc))
+    if match is None or int(match.group(1)) not in _LINK_ERRNOS:
+        return None
+    state = probe_can_link(channel, run=run)
+    seen = (f"现在读到 {channel}：{state.describe()}" if state is not None
+            else f"{channel} 探测不出来（没有 ip？）")
+    return (
+        f"这是主机的 CAN 链路问题，不是夹爪：{exc}\n"
+        f"   {seen}\n"
+        f"   发不出帧（ENETDOWN）只有两种成因：接口没 up，或者控制器 BUS-OFF。\n"
+        f"   后者 ``ip`` 照样印 UP,LOWER_UP、比特率也对，只有 ``can state`` 分得开。\n"
+        f"   手工配置：\n     {manual_can_hint(channel)}"
+    )
+
+
+def connect_failure_message(channel: str = CAN_CHANNEL) -> str:
+    """``connect()`` 没成的时候该说的话（03/04/05 共用这一份）。
+
+    别把它和 :func:`can_link_failure` 混了：``connect()`` 只建 socket 和 bind，
+    而这两步在**没 up 的接口上照样成功**，所以卡在这里几乎只剩两种情况——接口
+    根本不存在，或者 socket 建不出来。接口没起来、控制器 BUS-OFF 都不是这里的
+    事，它们是 ``enable()`` 发第一帧时才现形的。
+    """
+    return (
+        f"连不上 {channel}。connect() 只建 socket 和 bind，这两步在没 up 的接口\n"
+        f"   上也会成功，所以停在这里多半是：接口不存在，或者 socket 建不出来。\n"
+        f"   1) ip -details link show {channel} —— 不存在就查适配器（lsusb 里应看到\n"
+        f"      gs_usb）和 --channel 的名字对不对\n"
+        f"   2) 接口在、还是建不出来：看内核有没有编 CAN（modprobe can_raw）\n"
+        f"   3) 夹爪是否已上电、CAN_H/CAN_L 是否接对、终端电阻（120Ω）是否装了"
+    )
+
+
+def enable_failure_message(channel: str = CAN_CHANNEL, *, run=subprocess.run) -> str:
+    """``enable()`` 返回 False 时的说明。
+
+    使能是**第一次真的把帧发出去**，所以主机侧的链路问题也在这时候才现形。先探测
+    一遍：接口要是根本不对，就直说是链路，别把锅甩给夹爪。
+    """
+    state = probe_can_link(channel, run=run)
+    if state is not None and not state.ready(CAN_BITRATE):
+        return (
+            f"使能失败，而 {channel} 现在不是 SDK 需要的状态（{state.describe()}）：\n"
+            f"   先修链路再谈夹爪。手工配置：\n     {manual_can_hint(channel)}"
+        )
+    seen = state.describe() if state is not None else "探测不出来"
+    return (f"使能失败：夹爪可能处于错误状态或未上电（{channel} 这时的状态：{seen}）")
+
+
+# ═════════════════════════════════════════════════════════════════════════
 # 真机连接
 # ═════════════════════════════════════════════════════════════════════════
 
 
 def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
                       noise: bool = True):
-    """连接真机夹爪：导入 SDK → 选标定 → connect → 载入并核实标定 → enable。
+    """连接真机夹爪：导入 SDK → 选标定 → 探测 CAN 口 → connect → 载入并核实标定
+    → enable。
 
     标定在**连接之前**就定下来（:func:`choose_calibration_file`）：``--calib``
     给的优先，没给就用 SDK 包里那份出厂标定，出厂文件也读不出来才在终端里选。
@@ -925,18 +1316,16 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
 
     print(f"   [真机] 连接 {args.channel} · can_id={args.can_id:#04x} · "
           f"mst_id={args.mst_id:#04x}")
+    if not args.no_can_setup:
+        # 放在建 LiteGrip 之前：接口不对就别先开 socket。repair=enable——05 的
+        # --status 和 04 的 --passive 走的是 enable=False，那两条的定义就是「只看
+        # 不动」，替它们改掉接口，恰好把 --status 要诊断的东西抹了。
+        ensure_can_link(args.channel, repair=enable)
     gripper = litegrip.LiteGrip(channel=args.channel, can_id=args.can_id,
                                 mst_id=args.mst_id)
     try:
         if not gripper.connect():
-            raise SystemExit(
-                f"连不上 {args.channel}。检查：\n"
-                f"   1) 接口是否存在且已起来 —— "
-                f"sudo ip link set {args.channel} up type can bitrate 1000000\n"
-                f"   2) ip -details link show {args.channel}\n"
-                f"   3) 夹爪是否已上电、CAN_H/CAN_L 是否接对、"
-                f"终端电阻（120Ω）是否装了"
-            )
+            raise SystemExit(connect_failure_message(args.channel))
         # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它，轨迹的归一化开度也是。
         # allow_factory 只在选中的是 SDK 出厂那份时为真——库层默认拒它（它不属于
         # 任何一台具体夹爪），例程这一层把它打开是因为「没给 --calib」的默认行为
@@ -956,13 +1345,16 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
             print("   [真机] 已连接、已载入并核实标定（未使能，不发送运动指令）")
             return gripper
         if not gripper.enable():
-            raise SystemExit("使能失败：夹爪可能处于错误状态或未上电")
+            raise SystemExit(enable_failure_message(args.channel))
     except SystemExit:
         gripper.disconnect()
         raise
     except Exception as exc:      # SDK 的各种 *Error
         gripper.disconnect()
-        raise SystemExit(f"初始化真机失败：{exc}") from exc
+        # 使能那条路上撞到的 [Errno 100] 会走到这里（SDK 把 enable 的 OSError 包成
+        # HardwareError 抛出）：翻成主机链路问题，别再让操作员去查夹爪上电没有。
+        raise SystemExit(can_link_failure(exc, args.channel)
+                         or f"初始化真机失败：{exc}") from exc
 
     cfg = gripper.config
     # kp/kd 一起打出来：它们是标定文件里的值（也是保持帧的刚度），改了标定之后

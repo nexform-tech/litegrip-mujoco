@@ -65,12 +65,30 @@ API, so the version number cannot tell the two apart — the startup check
 (`LiteGrip.record_start`, `LiteGrip.poll`, `Trajectory.load`, …) instead of
 failing inside a control loop.
 
-Bring up CAN before running 03, 04 or 05:
+Bring up CAN before running 03, 04 or 05. You do not have to do it by hand: before
+connecting, the three of them read the interface with `ip -details link show` and
+run the privileged commands **only when its state is actually wrong** — an interface
+that is already right costs no command and no password prompt. `--no-can-setup`
+turns the step off.
 
 ```bash
-sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0          # what the probe reads, with -details
+python3 examples/04_mirror_real.py --no-can-setup   # or manage it yourself
+```
+
+What the automatic step runs when it does have to repair, and the manual recipe:
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100 fd off
+sudo ip link set can0 up
 ip -details link show can0
 ```
+
+`restart-ms` is not optional. The kernel default is `restart-ms 0`: the controller
+never leaves bus-off by itself, so one bad frame leaves the interface up, at the
+right bitrate, and unable to send anything. Some USB adapters reject the option;
+the examples retry that one command without it and leave the rest alone.
 
 > **Examples 03, 04 and 05 move real hardware.** Read [Before you drive the
 > hardware](#before-you-drive-the-hardware) first.
@@ -546,6 +564,20 @@ Confirm the CAN interface before anything moves:
 ip -details link show can0
 ```
 
+Read it with `-details`. The flag list alone cannot tell a working interface from a
+bus-off one: both print `UP,LOWER_UP` and the right bitrate. Only `can state` tells
+them apart, and a bus-off controller sends nothing at all — which is what
+`使能失败: [Errno 100] Network is down` usually means. It is a host link problem,
+not a gripper one: a CAN socket binds happily on a down interface, so `connect()`
+succeeds and the failure only shows on the first frame. The examples now probe the
+interface before connecting and repair it only when it is wrong — the recipe is near
+the top of this document. With `restart-ms 0` a bus-off interface stays broken until
+something reconfigures it.
+
+Do not run the examples against an interface another program is using: the repair
+step does not drive off a second master already on the bus, and the SDK does not
+share it.
+
 ### Which calibration is in use
 
 Every path that touches the hardware starts by resolving one. `--calib <path>`
@@ -598,6 +630,12 @@ repository's measurements, and has **not** been run against a gripper here. The
 transcripts come from those runs. Confirm the hardware paths on a bench before
 trusting them.
 
+Of the CAN probe, only the reading half is verified: the parser is pinned against
+real `ip -details link show` transcripts and `probe_can_link("can0")` was run
+read-only against a live interface. The **repair** half — the `sudo ip` sequence
+that reconfigures an interface — has only ever been run against a stand-in, so
+nobody has watched it bring a wrong interface up.
+
 ## Shared helpers
 
 [`_common.py`](_common.py) is imported by all five examples and is not an
@@ -606,9 +644,18 @@ example itself. It holds the argument parsers (`add_common_args()`,
 `check_sdk_api()`), the calibration resolution (`choose_calibration_file()`,
 `factory_calibration_path()`, the candidate listing, the "did the file actually
 take effect" checks), the connect/enable sequence (`open_real_gripper()`),
-`make_sim()`, `fresh_state()`, the unit conversions and the status line. Each
+the CAN link probe (`ensure_can_link()`), `make_sim()`, `fresh_state()`, the unit
+conversions and the status line. Each
 example therefore starts with `from _common import ...` *before* importing
 `litegrip_mujoco`.
+
+`ensure_can_link(channel, repair=...)` runs before the gripper is built, so a wrong
+interface fails before a socket is opened. A `repair=False` call only reports:
+05's `--status` and 04's `--passive` pass that, because their whole point is to
+observe, and reconfiguring the interface underneath them would delete the evidence
+they exist to collect. **Do not** treat a repair failure as fatal — it prints what
+it read and returns `False`, and the connect attempt right after it is what actually
+decides whether the link works.
 
 `fresh_state(gripper, timeout_s=...)` is the only way to read a real position:
 `poll()` returns `True` only when a status frame for our motor was decoded in
