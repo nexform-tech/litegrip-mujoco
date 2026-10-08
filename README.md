@@ -157,7 +157,9 @@ endpoints differ from the file's.
 With no explicit path, the scan looks in the directory holding the SDK's default calibration
 path (`$LITEGRIP_CALIB`, else `~/.litegrip/litegrip_calibration.json`) and in the working
 directory, for `*.json` regular files. The SDK's bundled factory file is never offered. Valid
-calibrations are listed before unusable JSON, newest first.
+calibrations are listed before unusable JSON; among the valid ones the SDK default path's
+directory comes first and the working directory second, and the newest file comes first within
+a directory.
 
 An explicit path always wins and is never second-guessed — including the SDK's default path.
 That file is marked `⚠ SDK default path` in the list to make the choice visible, but choosing
