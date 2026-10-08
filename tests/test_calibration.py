@@ -246,6 +246,42 @@ class TestDiscovery:
 
         assert cal.discover_calibrations() == [new, old]
 
+    def test_the_user_directory_wins_even_when_the_working_one_is_newer(
+            self, tmp_path, monkeypatch):
+        """目录次序比新旧优先：当前目录里的文件更新，也不能顶掉用户目录那份。
+
+        这条钉的是一个真实出现过的顺序反转。候选原先按 mtime 全局排序，用户
+        目录排在前面**只在两份文件的 mtime 恰好相同时**碰巧成立；两次写入落在
+        不同刻度上，当前目录那份就跑到最前。上面那条
+        ``test_scans_home_and_cwd`` 正是这么偶尔红的——它不控制 mtime。
+        """
+        home = make_home(tmp_path, monkeypatch)
+        (home / ".litegrip").mkdir()
+        home_cal = write_cal(home / ".litegrip", "a.json")
+        cwd = tmp_path / "work"
+        cwd.mkdir()
+        monkeypatch.chdir(cwd)
+        cwd_cal = write_cal(cwd, "b.json")
+        os.utime(home_cal, (time.time() - 3600, time.time() - 3600))
+        os.utime(cwd_cal, (time.time(), time.time()))
+
+        assert cal.discover_calibrations() == [home_cal, cwd_cal]
+
+    def test_unusable_files_sink_below_real_ones_across_directories(
+            self, tmp_path, monkeypatch):
+        """不是标定的 json 沉到底 —— 哪怕它躺在更靠前的那个目录里。
+
+        目录次序管的是候选之间的先后，管不到「这份根本不能用」：扫描目录里躺着
+        ``.releaserc.json`` 是常态，它不该把当前目录里一份真标定挤到后面去。
+        """
+        home = make_home(tmp_path, monkeypatch)
+        (home / ".litegrip").mkdir()
+        junk = home / ".litegrip" / ".releaserc.json"
+        junk.write_text("{}", encoding="utf-8")
+        real = write_cal(home, "real.json")     # make_home 已经把 cwd 指到 home
+
+        assert cal.discover_calibrations() == [real, str(junk)]
+
 
 # ══════════════════════════════════════════════════════════════════════════
 # 文件校验

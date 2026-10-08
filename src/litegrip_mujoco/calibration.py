@@ -463,9 +463,13 @@ def discover_calibrations(
         CalibrationFileError: *explicit* was given but does not exist.
     """
     found: List[str] = []
+    #: 每条候选来自哪一组扫描目录（0 = 用户目录，1 = 当前目录，……）。排序时目录
+    #: 次序优先于新旧 —— 这就是 docstring 承诺的顺序，而只按 mtime 排的话它只在
+    #: 两份文件 mtime 恰好相同时碰巧成立。
+    group_of: Dict[str, int] = {}
     seen = set()
 
-    def _add(candidate: str) -> None:
+    def _add(candidate: str, group: int) -> None:
         abspath = os.path.abspath(os.path.expanduser(str(candidate)))
         if not os.path.isfile(abspath):
             return
@@ -476,25 +480,30 @@ def discover_calibrations(
             return
         seen.add(key)
         found.append(abspath)
+        group_of[abspath] = group
 
+    head: List[str] = []
     if explicit:
         abspath = os.path.abspath(os.path.expanduser(str(explicit)))
         if not os.path.isfile(abspath):
             raise CalibrationFileError(
                 f"--calibration 指定的文件不存在: {abspath}"
             )
-        _add(abspath)
+        # -1：显式给的排在最前，不参与下面的排序，也就无所谓它属于哪一组。
+        _add(abspath, -1)
+        head = found[:1]
 
-    _add(default_calibration_path())
-    for directory in _scan_dirs(extra_dirs):
+    _add(default_calibration_path(), 0)
+    for group, directory in enumerate(_scan_dirs(extra_dirs)):
         for path in _json_files(directory):
-            _add(path)
+            _add(path, group)
 
-    # 可用的排前面，其余按新旧。扫描目录里躺着 `.releaserc.json` 之类的东西
-    # 是常态，它们该沉到底下去，而不是跟真标定混在一起。
-    head = found[:1] if explicit else []
+    # 可用的排前面，其余沉底：扫描目录里躺着 `.releaserc.json` 之类的东西是常态，
+    # 它们不该跟真标定混在一起。同一条内先按目录次序、再按新旧（`_json_files`
+    # 已经保证同一目录里是最新的在前）。
     rest = found[len(head):]
-    rest.sort(key=lambda p: (0 if _is_selectable(p) else 1, -_mtime(p)))
+    rest.sort(key=lambda p: (0 if _is_selectable(p) else 1,
+                             group_of[p], -_mtime(p)))
     return head + rest
 
 
