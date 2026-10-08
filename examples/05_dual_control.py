@@ -2,86 +2,23 @@
 # -*- coding: utf-8 -*-
 """样例 05 · 遥操作模式 — 按键盘，真机跟着走
 
-方向是 **仿真 → 真机**：键盘是手里的操纵杆，真机跟着它动。
+方向是 **仿真 → 真机**：键盘是手里的操纵杆。启动后真机不动，窗口显示的是真机**现在
+在哪**；按方向键真机才开始走，而且是按「速度」给定的速度走完全程，不会跟着按键跳。
 
-流程（全在 MuJoCo 窗口里操作）：
+用法:
+  ← / →      改「目标开度」，每按一下走一档（默认 5%）；按住不放就一档一档连着走。
+             **按一下就发指令，没有确认这一步** —— 别在真机动的时候乱按
+  ↓ / ↑      改「速度」：位置目标的最大速率，100% 就是手指的额定速度；随时可调
+  - / +      改「夹持力」：手指到位后顶住工件的力矩
+  Space / H  停下（真机锁在当前位置）/ 回到全开
+  Esc / Q    退出（退出前会失能：手指会松、夹着的东西会掉）
+  --status   只连、只读，不发运动指令；加 --clear-fault 顺手清掉锁死的故障
+  --dry-run  只开窗口，绝不碰 CAN —— 第一次跑先跑这个
 
-  1. 启动后真机**不动**：本样例按 200 Hz 发「锁在实测位置」的保持帧，同时把真机
-     的实测位置实时镜像进窗口——窗口显示的是真机**现在在哪**，不是你想让它去哪。
-  2. 按 **←/→** 改「目标开度」——真机才开始走。每按一下走一档（默认 5%），按住
-     不放就是连着按（GLFW 的自动重复会一档一档地来）。真机的目标是这个值，但位置
-     目标每帧最多前进「速度」允许的距离，收尾还会按 RAMP_DOWN_S 减速（见
-     KeyboardDrive），所以连按到 100% 也是按速度限定的速度走完全程，不会跟着按键
-     跳，也不会在到达时被速度前馈的台阶顶回来。
-  3. 按 **↓/↑** 改「速度」——位置目标的最大速率，100% 就是手指额定
-     RATED_SPEED_MM_S。随时可调：按快键真机也不会跟着快。
-  4. 按 **-/+** 改「夹持力」——手指到位后用这个力矩顶住（夹住工件时的推力）。
-  5. 按 **Space** 停下（目标留在原地，真机锁在当前位置）；按 **H** 回到全开。
-  6. **Esc / Q** 退出，退出前会**明确失能**（0xFD）：电机不再出力，手指会松、
-     夹着的工件会掉，但不会在电机上留下通信超时故障（原因见下）。
-
-为什么是键盘而不是滑条：MuJoCo 的被动查看器只给一个键盘回调
-（``launch_passive(key_callback=...)``），没有鼠标回调，也没有可加的控件——
-pybullet 那版的三个 ``addUserDebugParameter`` 滑条在这里建不出来。所以目标是
-**离散步进**（一次按键 = 一档），不是连续拖动。手感不同，但限速、收尾减速、
-只在收拢方向加力这些语义与 pybullet 那版一致。
-
-前提:
-  1. 真机接在 CAN 总线上（默认 can0，用 --channel 换）
-  2. 装了本仓库要的 litegrip SDK（没有发布到 PyPI，从源码装；三个真机样例用的是
-     同一份，nexform-tech/litegrip-python）:
-       pip install -e /path/to/litegrip-python
-     或 export LITEGRIP_SDK_DIR=/path/to/litegrip-python/src
-     或把 litegrip-python 仓库克隆到本仓库的同级目录
-  3. 一份可用的标定。标定文件由上位机标定后保存得到：
-       litegrip-studio / litegrip-console，或 SDK 自带的 tools/gui/litegrip_gui.py
-     标定的角度和毫米刻度是一台机器一个值，拿别人的算目标角，轻则夹不住、重则一条
-     指令撞限位。所以优先用 ``--calib`` 指**这台夹爪**自己那份；不给就用 SDK 包里
-     那份出厂标定（台架夹具的实测参数），出厂文件也读不出来才会在终端里列出候选让
-     你选；选不出来（非交互、没有候选）直接退出。
-     这条路径**要求有窗口**：目标由键盘给，没有窗口就没法操作。
-
-注意：会驱动真机！**没有「确认」这一步**：按一下方向键就发指令，所以别在真机动
-的时候乱按。第一次跑务必先 dry-run：
-
-    python3 examples/05_dual_control.py --dry-run    # 只开窗口，绝不碰 CAN
-
-没有显示（或想跑 CI）的时候：
-
-    python3 examples/05_dual_control.py --dry-run --headless --duration 12
-
-没有窗口就没有键盘，这一条路上目标改由一段脚本曲线给——它顶替的是「那只手」，
-只在 --dry-run 下存在。
-
-真机「能读不能控」怎么办（位置读得到、发指令不动、驱动板红灯闪）：
-
-    python3 examples/05_dual_control.py --status             # 只连、只读，不发运动指令
-    python3 examples/05_dual_control.py --status --clear-fault   # 清掉锁死的故障
-
-红灯闪 + 位置照读 + 指令无效，是电机进了**锁死**的故障态，而 --status 打的那个
-错误码就是它的名字（0xD = 通信丢失、0x9 = 欠压、0xA = 过流、0xB/0xC = 过温……）。
-两类原因最常见：
-
-  * **没人喂帧**：使能态的电机静默约 MEASURED_COMM_LOSS_S 就报 0xD。所以空闲也得
-    持续发帧（见 IdleKeeper）——本样例空闲时发的是锁位帧。
-  * **一条接不住的指令**：MIT 的 kp 是位置刚度，一整段行程的阶跃会让电机在第一帧
-    就被要求输出 ``kp × 1.845 rad`` 那么大的力矩。SDK 默认 kp=100 Nm/rad，那是
-    185 Nm，而额定只有 ~10 Nm；本机标定现在是 5.0，同样的阶跃约 9 Nm。但 kp 是
-    标定文件里的一项、随时可能被改回去，所以本样例限制的是**位置目标每帧走多远**
-    （见 KeyboardDrive），和 kp 取多少无关，也和按键按得多快无关。
-
-为什么要自己发帧：SDK 的 move_to()/goto_rad() 内部是 control_mit_stream()，
-它自己 sleep 5 ms 循环、不让出控制权，MuJoCo 窗口会卡住、也读不到按键。所以这里
-用 SDK 公开的 send_mit_frame() + poll() 自己组循环——这正是它们被公开出来的用途
-（自定义控制循环，自己管时序）。
-
-运行:
-  python3 examples/05_dual_control.py --calib /path/to/这台夹爪的标定.json
-  python3 examples/05_dual_control.py                # 不给就用 SDK 出厂标定
-  python3 examples/05_dual_control.py --force 20 --speed 40
-  python3 examples/05_dual_control.py --channel can1        # 换 CAN 口
-  python3 examples/05_dual_control.py --status              # 只连、只读，不发运动指令
-  python3 examples/05_dual_control.py --dry-run --headless --duration 12
+前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK · 有一份
+      这台夹爪的标定（不给 --calib 就用 SDK 出厂那份）· 有可用的显示：目标由键盘给，
+      没有窗口就改不动（--status 和 --dry-run --headless 不需要）。装 SDK、选标定、
+      错误码、为什么要自己发帧见 examples/README.zh-CN.md。
 """
 import argparse
 import math
