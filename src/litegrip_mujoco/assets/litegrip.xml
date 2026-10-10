@@ -1,7 +1,7 @@
 <!--
   litegrip.xml — LiteGrip 平行两指夹爪的 MuJoCo 模型。
 
-  几何、惯量、关节原点全部取自 litegrip-urdf/urdf/litegrip_urdf.urdf.xacro
+  几何、惯量、关节原点全部取自 litegrip-description/urdf/litegrip_urdf.urdf.xacro
   与同目录的三个 STL 网格，未作改动。单位：米 / 弧度 / 千克。
 
   ════════════════════════════════════════════════════════════════════════

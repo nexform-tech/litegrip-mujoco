@@ -18,14 +18,14 @@ src/litegrip_mujoco/
 └── assets/
     ├── litegrip.xml     夹爪模型
     ├── scene.xml        litegrip.xml + 地板 + 灯光 + 被夹具托住的工件
-    └── meshes/          从 litegrip-urdf 逐字节拷贝的 3 个 STL
+    └── meshes/          从 litegrip-description 逐字节拷贝的 3 个 STL
 ```
 
 ## 数字从哪来
 
 | 来源 | 提供什么 |
 | --- | --- |
-| `litegrip-urdf/urdf/litegrip_urdf.urdf.xacro` + 3 个 STL | 全部几何、惯量、关节原点 |
+| `litegrip-description/urdf/litegrip_urdf.urdf.xacro` + 3 个 STL | 全部几何、惯量、关节原点 |
 | `lite-grip`（SDK） | 控制语义、单位、`grasp()` 堵转逻辑、异常类型 |
 | `litearm-mujoco` | 包形态、例程编号、控制器结构 |
 

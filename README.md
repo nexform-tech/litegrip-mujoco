@@ -422,7 +422,7 @@ gripper in the wrong coordinates rather than an exception.
 
 | Repository | Role |
 | --- | --- |
-| [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro description package — the geometry this model is built from |
+| [litegrip-description](https://github.com/nexform-tech/litegrip-description) | URDF/xacro description package — the geometry this model is built from |
 | [litegrip-pybullet](https://github.com/nexform-tech/litegrip-pybullet) | PyBullet simulation environment for the same gripper |
 | [litearm-mujoco](https://github.com/nexform-tech/litearm-mujoco) | MuJoCo environment for the LiteArm, which this package's shape follows |
 | [lite-grip](https://gitee.com/yudao_hz_1/lite-grip) | The hardware SDK this package mirrors |

@@ -18,14 +18,14 @@ src/litegrip_mujoco/
 └── assets/
     ├── litegrip.xml     The gripper model
     ├── scene.xml        litegrip.xml + floor + lights + a fixtured workpiece
-    └── meshes/          Three STLs copied byte-for-byte from litegrip-urdf
+    └── meshes/          Three STLs copied byte-for-byte from litegrip-description
 ```
 
 ## Where the numbers come from
 
 | Source | Provides |
 | --- | --- |
-| `litegrip-urdf/urdf/litegrip_urdf.urdf.xacro` + 3 STLs | All geometry, inertia and joint origins |
+| `litegrip-description/urdf/litegrip_urdf.urdf.xacro` + 3 STLs | All geometry, inertia and joint origins |
 | `lite-grip` (the SDK) | Control semantics, units, `grasp()` stall logic, error types |
 | `litearm-mujoco` | Package shape, example numbering, controller structure |
 
