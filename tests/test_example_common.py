@@ -508,8 +508,10 @@ def connected_events(monkeypatch):
     只留一个**顺序**：探测 → 建 LiteGrip。顺序错了，接口不对时就已经先开了 socket。
     """
     events: list = []
+    # ``None`` = 这次没定下标定文件（只可能来自 ``--dry-run``：不碰 CAN 也就不
+    # 依赖标定）。真机那一档会直接退出，走不到这里。
     monkeypatch.setattr(_common, "choose_calibration_file",
-                        lambda *a, **k: (None, False))
+                        lambda *a, **k: None)
     monkeypatch.setattr(_common, "import_litegrip",
                         lambda: _fake_sdk(events))
     monkeypatch.setattr(_common, "check_sdk_api", lambda sdk: None)
@@ -601,7 +603,7 @@ class TestArgParsers:
         assert args.can_id == 0x08
         assert args.mst_id == 0x18
         # ``None`` 表示「命令行没给」。它不是路径：``choose_calibration_file``
-        # 会先把它换成 SDK 的出厂标定，出厂那份也读不出来才去问。
+        # 会先把它换成 SDK 包里那份出厂标定；出厂那份也读不出来就直接退出。
         assert args.calib is None
         assert args.no_can_setup is False
 

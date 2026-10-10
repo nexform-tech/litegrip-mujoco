@@ -38,7 +38,6 @@ from .calibration import (
     default_calibration_path,
     describe_candidate,
     discover_calibrations,
-    format_selection,
     is_calibrated,
     is_simulated_device,
     load_calibration_file,
@@ -123,7 +122,7 @@ __all__ = [
     "MirrorMode",
     "read_frac_open",
     "write_frac_open",
-    # 标定：真机运动前必须先选定一份标定文件
+    # 标定：不给 --calibration 时默认用 SDK 包里那份出厂标定
     "Calibration",
     "CalibrationError",
     "CalibrationFileError",
@@ -135,7 +134,6 @@ __all__ = [
     "default_calibration_path",
     "describe_candidate",
     "discover_calibrations",
-    "format_selection",
     "is_calibrated",
     "is_simulated_device",
     "load_calibration_file",

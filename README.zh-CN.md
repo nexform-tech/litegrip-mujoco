@@ -106,9 +106,13 @@ dual.disconnect()           # 注意：close() 是合拢夹爪，不是释放资
 `max_position_rad`（张开端）和 `rad_to_mm`。它由上位机（GUI）的标定工具写出，
 本包自己产不出标定文件。
 
-**任何会让真机动起来的代码，都必须在运行时选定一份标定文件。** 没有谁会替你选，
-默认的那份也绝不会被隐式使用。原因见[为什么要有这道闸](#为什么要有这道闸)；
-一句话版本是：SDK 的 `load_calibration()` 无法告诉你它到底读了哪个文件。
+**任何会让真机动起来的代码，都需要一份标定文件。** 不给路径时用的就是 SDK 包里那份：
+`litegrip` 包旁边的 `factory_calibration.json`。没有谁会去扫盘找标定，也没有谁会问你
+要哪一份。原因见[为什么要有这道闸](#为什么要有这道闸)；一句话版本是：SDK 的
+`load_calibration()` 无法告诉你它到底读了哪个文件。
+
+出厂文件里是**台架夹具**的实测参数，不是这台夹爪的。凡是会说出「用了哪份文件」的地方
+都把这句话一起说出来 —— 两份文件形状一样，只有数字不同。
 
 ### 怎么选
 
@@ -116,27 +120,31 @@ dual.disconnect()           # 注意：close() 是合拢夹爪，不是释放资
 
 | 调用方式 | 行为 |
 | --- | --- |
-| `--calibration PATH` | 直接用这份文件，不弹提示。脚本和非交互运行走这条。 |
-| 不带参数、交互式终端 | 列出候选及其端点、行程，然后让你挑。 |
-| 不带参数、非交互终端 | 以状态码 2 退出，并打印该用的 `--calibration` 写法。 |
+| `--calibration PATH` | 直接用这份文件，不猜。脚本与「按这台夹爪自己的数驱动」走这条。 |
+| 不带参数 | 用 SDK 的出厂标定，并把它的路径打出来。 |
+| 不带参数、连出厂文件也没有 | 以状态码 1 退出，并打印该用的 `--calibration` 写法。 |
 
 ```bash
-# 先看看这台机器上有哪些，再挑一份 —— 在仓库根目录执行
+# 先看看这台机器上有哪些，再按需使用 —— 在仓库根目录执行
 python3 examples/05_dual_control.py --list-calibrations
 python3 examples/05_dual_control.py --calibration ~/.litegrip/litegrip_calibration.json
 ```
 
-`--dry-run` 不动真机，完全跳过标定选择。
+`--list-calibrations` 是一次查询，不是流程里的一步：列完候选就以 0 退出，什么都不动。
+它列出来的路径要手动喂给 `--calibration`。
 
-从 Python 调时，`calibration=` 是关键字参数，`apply_calibration()` 是显式调用：
+`--dry-run` 不动真机，也就不需要标定。
+
+从 Python 调时，`calibration=` 是关键字参数，`apply_calibration()` 是显式调用。不传
+`calibration` 就用出厂标定，传了就用那份文件：
 
 ```python
 from litegrip_mujoco import DualGripper, MirrorMode, apply_calibration
 
 CALIBRATION = "~/.litegrip/litegrip_calibration.json"
 
-dual = DualGripper(channel="can0", can_id=0x08, calibration=CALIBRATION)
-MirrorMode(real, sim, rate_hz=50.0, calibration=CALIBRATION)
+dual = DualGripper(channel="can0", can_id=0x08)                # 出厂标定
+MirrorMode(real, sim, rate_hz=50.0, calibration=CALIBRATION)  # 这台夹爪的那份
 
 real.connect()
 apply_calibration(real, CALIBRATION)   # connect() 之后、enable() 之前
@@ -144,26 +152,27 @@ real.enable()
 ```
 
 顺序是有意义的。`enable()` 是第一个给电机上电的调用，标定必须在它上面套好并校验完。
-`apply_calibration()` 只抛异常、不给警告：读不出的文件、自相矛盾的文件、SDK 的出厂文件、
-以及载入后 `config` 端点与文件对不上的情况，一律直接报错。
+`apply_calibration()` 只抛异常、不给警告：读不出的文件、自相矛盾的文件，以及载入后
+`config` 端点与文件对不上的情况，一律直接报错。
 
 ### 候选从哪来
 
-不给显式路径时，扫描目录是「SDK 默认标定路径所在目录」（`$LITEGRIP_CALIB`，否则
+`discover_calibrations()` 扫描「SDK 默认标定路径所在目录」（`$LITEGRIP_CALIB`，否则
 `~/.litegrip/litegrip_calibration.json`）和当前工作目录，取其中的 `*.json` 普通文件。
 SDK 自带的出厂文件永远不出现在候选里。可用的标定排在不可用的 JSON 前面，按修改时间倒序。
+`--list-calibrations` 打的就是这份列表，每份文件附带端点和行程。
 
-显式给的路径永远优先，也永远不会被质疑 —— 包括 SDK 的默认路径。那份文件在列表里会标上
-`⚠ SDK 默认路径`，让选择可见，但**刻意选它是允许的**。被拒绝的只是「不选就用」。
+发现候选是只读的：它只喂给列表，从不喂给选择。显式给的 `--calibration` 路径永远优先，
+也永远不会被质疑 —— 包括 SDK 的默认路径。那份文件在列表里标着
+`⚠ SDK 默认用户路径`，因为它是和别的候选一样的一份候选，不是默认值。
 
 ### 这道闸检查什么
 
-三层，因为任何单独一层都能被绕过：
+两层，因为只有第一层看不出 SDK 的静默回落：
 
 1. 在 SDK 拿到文件**之前**先解析并校验 —— 必填键齐全、取值是有限数、`rad_to_mm > 0`，
    且闭合端在数值上**大于**张开端。不过关的文件根本不会交给 SDK。
-2. 按 `realpath` 认身份，拒绝 SDK 的出厂标定，所以改名或软链接都蒙混不过去。
-3. 载入之后，把 `config.pos_closed_rad` / `pos_open_rad` 与文件逐字段比对。对不上就报错，
+2. 载入之后，把 `config.pos_closed_rad` / `pos_open_rad` 与文件逐字段比对。对不上就报错，
    并把「请求的端点」和「实际读到的端点」一起打出来 —— 那正是静默回落到出厂值的特征。
 
 来源这一道闸，外加「`config` 是否仍与已套用的标定一致」这一项，在每次
@@ -173,8 +182,8 @@ SDK 自带的出厂文件永远不出现在候选里。可用的标定排在不�
 ### 这道闸检查不了什么
 
 一份格式完全正确、但属于**同型号另一台夹爪**的标定文件，与正确的那份无法区分。
-这里没有任何办法识别它。唯一可做的检查是算术：选择器会打印每份文件隐含的行程，
-动手之前先把那个数看一眼，与这台夹爪的真实行程对一下。
+这里没有任何办法识别它。唯一可做的检查是算术：`--list-calibrations` 会打印每份文件
+隐含的行程，动手之前先把那个数看一眼，与这台夹爪的真实行程对一下。
 
 ### 换算函数默认严格
 
@@ -309,7 +318,7 @@ README](examples/README.zh-CN.md#为什么窗口里的字只有英文)。
 `resolve_calibration_path()`、`discover_calibrations()`、`load_calibration_file()`、
 `default_calibration_path()`、`sdk_factory_calibration_path()`、`mark_calibrated()`、
 `applied_calibration()`、`is_calibrated()`、`is_simulated_device()`、
-`require_usable_device()`、`format_selection()`、`describe_candidate()`，
+`require_usable_device()`、`describe_candidate()`，
 `Calibration` 数据类，以及异常 `CalibrationError`、`CalibrationRequiredError`、
 `CalibrationFileError`、`CalibrationVerificationError`、`UncalibratedDeviceError`。
 
@@ -322,10 +331,10 @@ README](examples/README.zh-CN.md#为什么窗口里的字只有英文)。
 | 模型几何与单位 | ✅ 已验证 | `tests/test_mujoco_gripper.py::TestGeometryAndUnits` —— 87.000 mm 开口、网格单位、全行程无自穿透 |
 | 那些反直觉行为的物理保真 | ✅ 已验证 | `TestForceSemantics` 与 `TestActuator` 把「已知行为」逐条固化成测试 |
 | 与 `LiteGrip` 的 API 对等 | ✅ 已验证 | `TestApiParity` 持有一份冻结的成员清单；装了 SDK 时会对着真类比，2026-09-28 那次报出缺 `refresh_status` —— 由 PR #4 补上 |
-| 标定闸 | ✅ 已验证 | `tests/test_calibration.py`，84 个用例，对手是一个能让 `load_calibration()` 复现 SDK 静默回落的替身 |
+| 标定闸 | ✅ 已验证 | `tests/test_calibration.py`，91 个用例，对手是一个能让 `load_calibration()` 复现 SDK 静默回落的替身 |
 | 例程 01–03 | ✅ 已验证 | 01、02 带 `--headless` 退出码 0；03 用 `--dry-run` 无头跑完录制、存盘、回放，用 `--play` 无头回放已存的文件。不需要硬件、不需要 SDK |
 | 例程 04 / 05 的 `--dry-run` | ✅ 已验证 | 两个无头都退出码 0；04 镜像一个脚本驱动的替身，05 走完脚本目标并在目标之间保持位置 |
-| 例程命令行契约 | ✅ 已验证 | `--list-calibrations` 退出码 0；非交互且没有可用标定时退出码 1 并打印指引。2 留给 argparse 自己的用法错误 |
+| 例程命令行契约 | ✅ 已验证 | `--list-calibrations` 是纯查询，退出码 0；没有可用标定又没给 `--calibration` 时退出码 1 并打印指引。2 留给 argparse 自己的用法错误 |
 | 真机运动 | ⚠️ **未验证** | 手上没有 CAN 硬件。真机那条路径只经由 `DryRunGripper` 跑过，它报的是一份 2026-09-24 标定的 θ 端点；本包从未在这里驱动过 SDK 本身 |
 | CAN 探测（`ensure_can_link` / `--no-can-setup`） | ⚠️ **部分验证** | 「读」这一半验证过：解析器钉的是 `ip -details link show` 的真输出（含一份每个标志位都正常、其实是 bus-off 的样本），并且 `probe_can_link("can0")` 对着一只活着的接口只读地跑过、读得对。「拉起」那一半——那串把不对的接口配好的 `sudo ip` 命令——只对着替身 `run` 跑过，**没人看着它修好过一个真接口** |
 

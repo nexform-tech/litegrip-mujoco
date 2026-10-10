@@ -37,8 +37,9 @@
 跨设备的数据流都只走这个量。
 
 真机侧取 θ 端点用 ``config.pos_closed_rad`` / ``config.pos_open_rad``。这两个值
-只有在设备**确实载入过一份人选定的标定文件**时才可信 —— 见
-:mod:`litegrip_mujoco.calibration`。:func:`read_frac_open` 与
+只有在设备**确实载入过一份标定文件**时才可信 —— 见
+:mod:`litegrip_mujoco.calibration`（缺省用 SDK 包里那份出厂标定）。
+:func:`read_frac_open` 与
 :func:`write_frac_open` 默认按此严格检查，端点不可信就直接报错，不再退回
 ``position_mm / max_stroke_mm``（那条老路径仍在 ``strict=False`` 下可达，
 但库内没有任何调用点用它）。
@@ -100,7 +101,9 @@ def _strict_endpoints(device: Any, action: str) -> Tuple[float, float]:
             f"pos_closed_rad={getattr(cfg, 'pos_closed_rad', None)}, "
             f"pos_open_rad={getattr(cfg, 'pos_open_rad', None)}。\n"
             "       这组值是 SDK 的默认值，说明标定没生效。"
-            "请先 apply_calibration(device, path) 选一份真机标定文件。"
+            "请先 apply_calibration(device, path) 载入一份标定文件"
+            "（apply_calibration(device, sdk_factory_calibration_path()) 就是"
+            "不给 --calibration 时的默认那份）。"
         )
     return endpoints
 
@@ -113,9 +116,9 @@ def read_frac_open(
 ) -> float:
     """从任意夹爪设备读出无量纲开度 ∈ [0, 1]。
 
-    默认 ``strict=True``：先确认设备的端点来自一份人选定的标定文件，再用
-    θ 与标定端点算开度（最准，与 mm 刻度无关）。端点不可信时抛
-    :class:`~litegrip_mujoco.calibration.UncalibratedDeviceError`。
+    默认 ``strict=True``：先确认设备的端点来自一份标定文件（缺省是 SDK 包里
+    那份出厂标定），再用 θ 与标定端点算开度（最准，与 mm 刻度无关）。端点
+    不可信时抛 :class:`~litegrip_mujoco.calibration.UncalibratedDeviceError`。
 
     Args:
         device: 任意夹爪（真机或仿真）。
@@ -256,14 +259,14 @@ class DualGripper:
             render: 是否打开仿真查看器。
             mirror_first: 启动时先让仿真对齐真机的当前开度。
             dry_run: 无 CAN 硬件时用虚拟夹爪代替真机。
-            calibration: 本次真机运动使用的标定 JSON。缺省时**交互式**要求
-                操作者选择；非交互终端直接抛 ``CalibrationRequiredError``。
-                本参数缺失时绝不使用任何默认标定文件。
-            allow_uncalibrated: 显式放弃标定校验（会在控制台留痕）。
-                不传 ``calibration`` 又不开这个开关，就必须能弹出选择器。
+            calibration: 本次真机运动使用的标定 JSON。缺省时用 SDK 包里
+                那份**出厂标定**（台架夹具的实测参数，不是这台夹爪自己量
+                的）；要按这台夹爪的尺寸驱动，就把上位机保存的那份传进来。
+            allow_uncalibrated: 显式放弃标定校验（会在控制台留痕），
+                真机按它当前的 config 运动。
 
         Raises:
-            CalibrationRequiredError: 真机没有可用标定，且无法让操作者选择。
+            CalibrationRequiredError: 真机没有可用标定，出厂文件也读不出来。
             CalibrationFileError: ``calibration`` 指向的文件不可用。
         """
         if real is None:
@@ -537,9 +540,10 @@ class MirrorMode:
 
     仿真是**纯跟随**的：镜像期间不要另发运动指令给 ``sim``，否则两者会互相打架。
 
-    ``real_gripper`` 是真机时必须带一份人选定的标定（``calibration=`` 或交互式
-    选择）—— 镜像读的是 ``frac_open``，而它由 ``config`` 的 θ 端点算出，端点没
-    标定过就只是个编出来的数。仿真设备自动豁免。
+    ``real_gripper`` 是真机时必须有可用的标定：``calibration=`` 给的那份，缺省
+    是 SDK 包里的出厂标定（台架夹具的实测参数，**不是**这台夹爪自己量的）。镜
+    像读的是 ``frac_open``，而它由 ``config`` 的 θ 端点算出，端点没标定过就只是
+    个编出来的数。仿真设备自动豁免。
     """
 
     def __init__(self, real_gripper: Any, sim_gripper: MujocoGripper,
@@ -551,12 +555,12 @@ class MirrorMode:
             real_gripper: 被跟随的真机。
             sim_gripper: 跟随的仿真。
             rate_hz: 镜像频率。
-            calibration: 本次真机运动使用的标定 JSON。缺省时**交互式**要求
-                选择；非交互终端直接抛 ``CalibrationRequiredError``。
+            calibration: 本次真机运动使用的标定 JSON。缺省时用 SDK 包里
+                那份**出厂标定**（台架夹具的实测参数，不是这台夹爪自己量的）。
             allow_uncalibrated: 显式放弃标定校验（会在控制台留痕）。
 
         Raises:
-            CalibrationRequiredError: 真机没有可用标定，且无法让操作者选择。
+            CalibrationRequiredError: 真机没有可用标定，出厂文件也读不出来。
             CalibrationFileError: ``calibration`` 指向的文件不可用。
         """
         self._real = real_gripper

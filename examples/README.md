@@ -594,18 +594,30 @@ is used, and the example says so when it starts. The path is resolved from the
 package directory, so it follows the checkout to any machine. **That file holds
 the factory's bench-fixture measurements, not measurements of your gripper**:
 its travel endpoints may not match the unit in front of you. Pass `--calib` for
-anything beyond a first look. `--dry-run` resolves the same file, because the
-target angles and the millimetre scale come from it even when no CAN traffic
-follows.
+anything beyond a first look.
 
-Only when no factory file can be read either do the candidates in `~/.litegrip`
-get listed, with their mtime and key values (closed/open angles, `rad_to_mm`,
-`kp`, `mst_id`), and you pick one by number or type a path. The `*.sim.json`
-file the studio writes for its simulator backend and the `*.bak` backups are
-never offered, and a `*.sim.json` named explicitly is refused — its scale
-belongs to the simulated gripper. With no terminal to ask on (a pipe, a script,
-CI) or nothing to offer, the run stops with exit 1 and says how to get a
-calibration and how to pass one.
+Nothing is scanned and nothing is offered to pick from. A run reads exactly one
+file: the one named by `--calib`, else the SDK's factory file. When neither can
+be read it stops with exit 1 and prints the `--calib` form to use — it never
+guesses among the JSON files lying around on the machine.
+
+`--list-calibrations` is how you find a file without guessing. It is a query
+that prints the candidates and their key values (closed/open angles,
+`rad_to_mm`, `kp`, `mst_id`), then exits 0:
+
+```bash
+python3 examples/05_dual_control.py --list-calibrations
+```
+
+The `*.sim.json` file the studio writes for its simulator backend and the
+`*.bak` backups are never offered, and a `*.sim.json` named explicitly is
+refused — its scale belongs to the simulated gripper.
+
+`--dry-run` moves no hardware and does not need a calibration at all: the
+stand-in reports its own angles, and what it never reads it cannot get wrong.
+Pass `--calib` anyway if you want the run to say which file the real path would
+have used. `03` resolves the same way; `04` and `05` share
+`open_real_gripper`.
 
 The file comes from calibrating *this* gripper in the host software
 (`litegrip-studio` / `litegrip-console`, or the SDK's own
@@ -642,7 +654,8 @@ nobody has watched it bring a wrong interface up.
 example itself. It holds the argument parsers (`add_common_args()`,
 `add_hardware_args()`), the SDK discovery (`import_litegrip()`, `sdk_dir()`,
 `check_sdk_api()`), the calibration resolution (`choose_calibration_file()`,
-`factory_calibration_path()`, the candidate listing, the "did the file actually
+`factory_calibration_path()`, `is_sdk_factory_calibration()`, the candidate
+listing, the "did the file actually
 take effect" checks), the connect/enable sequence (`open_real_gripper()`),
 the CAN link probe (`ensure_can_link()`), `make_sim()`, `fresh_state()`, the unit
 conversions and the status line. Each

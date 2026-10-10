@@ -1,7 +1,8 @@
 """标定选择与来源校验的测试。
 
-真机运动前必须先选定一份标定文件，且绝不使用默认那一份 —— 这一组用例钉的就是
-这条规则，以及它周围那些**看起来能省事、实则会动错真机**的捷径。
+不给 ``--calibration`` 时用 SDK 包里那份出厂标定；换标定只有一个办法：显式给出
+文件的路径。这一组用例钉的就是这两档，以及它周围那些**看起来能省事、实则会动错
+真机**的捷径——尤其是「悄悄扫盘挑一份」。
 
 全部是纯仿真的：不需要 CAN、不需要 `litegrip` SDK、不需要 TTY。需要真机的路径
 用 `FakeReal`（一个记录调用顺序的鸭子类型替身）覆盖。
@@ -357,127 +358,92 @@ class TestLoadFile:
         home = make_home(tmp_path, monkeypatch)
         (home / ".litegrip").mkdir()
         path = write_cal(home / ".litegrip", "litegrip_calibration.json")
-        assert "SDK 默认路径" in cal.describe_candidate(path)
+        described = cal.describe_candidate(path)
+        assert "SDK 默认用户路径" in described
+        assert "不会被自动选中" in described   # 一句话说清它只是候选，不是默认值
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 选择器
+# 选择：两档
 # ══════════════════════════════════════════════════════════════════════════
 
 
-def answers(*values):
-    """把一串输入喂给选择器。"""
-    queue = list(values)
+def fake_factory(tmp_path, monkeypatch, **fields):
+    """造一份「SDK 自带的出厂标定」并把库层的探测指到它。
 
-    def _ask(_prompt=""):
-        if not queue:
-            raise EOFError
-        return queue.pop(0)
-
-    return _ask
-
-
-class TestPicker:
-    def test_index_input(self, tmp_path):
-        first = write_cal(tmp_path, "a.json")
-        second = write_cal(tmp_path, "b.json")
-        chosen = cal.prompt_for_calibration(
-            [first, second], input_fn=answers("2"), is_tty=True
-        )
-        assert chosen == second
-
-    def test_full_path_input(self, tmp_path):
-        listed = write_cal(tmp_path, "a.json")
-        outside = write_cal(tmp_path, "outside.json")
-        chosen = cal.prompt_for_calibration(
-            [listed], input_fn=answers(outside), is_tty=True
-        )
-        assert chosen == outside
-
-    def test_basename_input(self, tmp_path):
-        listed = write_cal(tmp_path, "a.json")
-        chosen = cal.prompt_for_calibration(
-            [listed], input_fn=answers("a.json"), is_tty=True
-        )
-        assert chosen == listed
-
-    def test_reprompts_on_bad_input(self, tmp_path):
-        first = write_cal(tmp_path, "a.json")
-        chosen = cal.prompt_for_calibration(
-            [first], input_fn=answers("9", "zzz", "", "1"), is_tty=True
-        )
-        assert chosen == first
-
-    def test_reprompts_when_candidate_is_invalid(self, tmp_path, capsys):
-        """选中一份坏文件时要说明原因并重问，而不是直接退出。"""
-        bad = tmp_path / "bad.json"
-        bad.write_text("{}")
-        good = write_cal(tmp_path, "good.json")
-
-        chosen = cal.prompt_for_calibration(
-            [str(bad), good], input_fn=answers("1", "2"), is_tty=True
-        )
-        assert chosen == good
-        assert "zero_position_rad" in capsys.readouterr().out
-
-    @pytest.mark.parametrize("quit_word", ["q", "Q", "quit"])
-    def test_quit_raises(self, tmp_path, quit_word):
-        path = write_cal(tmp_path, "a.json")
-        with pytest.raises(cal.CalibrationRequiredError):
-            cal.prompt_for_calibration([path], input_fn=answers(quit_word), is_tty=True)
-
-    def test_exhausted_input_raises(self, tmp_path):
-        path = write_cal(tmp_path, "a.json")
-        with pytest.raises(cal.CalibrationRequiredError):
-            cal.prompt_for_calibration([path], input_fn=answers("zzz"), is_tty=True)
-
-    def test_non_tty_raises_with_the_fix(self, tmp_path):
-        path = write_cal(tmp_path, "a.json")
-        with pytest.raises(cal.CalibrationRequiredError) as info:
-            cal.prompt_for_calibration([path], is_tty=False)
-        message = str(info.value)
-        assert "--calibration" in message
-        assert "--dry-run" in message
-
-    def test_empty_candidate_list_explains_where_files_come_from(self):
-        with pytest.raises(cal.CalibrationRequiredError) as info:
-            cal.prompt_for_calibration([], is_tty=True)
-        message = str(info.value)
-        assert "上位机" in message
-        assert "--calibration" in message
+    真实的探测会去看 ``sys.path`` 上的 ``litegrip``；跑测试的机器上可能真装着一
+    份（这台 bench 上就有），用例的结论不该因此改变。
+    """
+    path = write_cal(tmp_path, "factory_calibration.json", **fields)
+    monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: path)
+    return path
 
 
 class TestResolve:
+    """``resolve_calibration_path`` 的两档，顺序就是优先级。"""
+
     def test_explicit_wins_and_is_validated(self, tmp_path, monkeypatch):
         make_home(tmp_path, monkeypatch)
+        factory = fake_factory(tmp_path, monkeypatch)
         path = write_cal(tmp_path, "mine.json")
-        assert cal.resolve_calibration_path(path, is_tty=False) == path
+        chosen = cal.resolve_calibration_path(path)
+        assert chosen == path
+        assert chosen != factory
 
     def test_explicit_invalid_raises_immediately(self, tmp_path, monkeypatch):
         make_home(tmp_path, monkeypatch)
+        fake_factory(tmp_path, monkeypatch)     # 有出厂标定也不许拿它顶替
         bad = tmp_path / "bad.json"
         bad.write_text("{}")
         with pytest.raises(cal.CalibrationFileError):
-            cal.resolve_calibration_path(str(bad), is_tty=False)
+            cal.resolve_calibration_path(str(bad))
 
-    def test_never_falls_back_to_the_default_path(self, tmp_path, monkeypatch):
-        """默认路径上有一份**可用**的标定，也不许自己用 —— 必须问人。"""
+    def test_no_path_uses_the_sdk_factory_calibration(self, tmp_path, monkeypatch):
+        """不给路径时的默认值：SDK 包里那份出厂标定。
+
+        它跟着包目录解析，所以一台新机器不用先去找标定文件就能跑。
+        """
+        make_home(tmp_path, monkeypatch)
+        factory = fake_factory(tmp_path, monkeypatch)
+        assert cal.resolve_calibration_path(None) == factory
+
+    def test_never_uses_the_default_user_path(self, tmp_path, monkeypatch):
+        """``~/.litegrip/litegrip_calibration.json`` 上放着一份**可用**的标定，
+        也不许自己用 —— 那份是 SDK 的默认用户路径，不是这台夹爪的证明。"""
         home = make_home(tmp_path, monkeypatch)
         (home / ".litegrip").mkdir()
         write_cal(home / ".litegrip", "litegrip_calibration.json")
+        factory = fake_factory(tmp_path, monkeypatch)
 
-        with pytest.raises(cal.CalibrationRequiredError):
-            cal.resolve_calibration_path(None, interactive=False)
+        assert cal.resolve_calibration_path(None) == factory
 
-    def test_prompts_when_interactive(self, tmp_path, monkeypatch):
+    def test_no_factory_file_raises_and_names_the_flag(self, tmp_path, monkeypatch):
+        """出厂文件都找不到 ⇒ 停下，并说清用哪个开关换一份。
+
+        以前这里是「列出候选让操作员选」；现在不扫盘也不提问——猜哪份 JSON 是哪
+        台夹爪的，不是这一层能做的事。
+        """
+        make_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: None)
+
+        with pytest.raises(cal.CalibrationRequiredError) as info:
+            cal.resolve_calibration_path(None)
+        message = str(info.value)
+        assert "--calibration" in message
+        assert "--list-calibrations" in message, "没说怎么去找候选"
+
+    def test_an_unreadable_factory_file_raises(self, tmp_path, monkeypatch):
+        """出厂文件在那儿但读不出来（SDK 装得残缺）也是同一档：停下。"""
         home = make_home(tmp_path, monkeypatch)
         (home / ".litegrip").mkdir()
-        only = write_cal(home / ".litegrip", "litegrip_calibration.json")
+        write_cal(home / ".litegrip", "litegrip_calibration.json")   # 有候选也不许用
+        broken = tmp_path / "factory_calibration.json"
+        broken.write_text("{not json")
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: str(broken))
 
-        chosen = cal.resolve_calibration_path(
-            None, input_fn=answers("1"), is_tty=True
-        )
-        assert chosen == only
+        with pytest.raises(cal.CalibrationRequiredError) as info:
+            cal.resolve_calibration_path(None)
+        assert "--calibration" in str(info.value)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -513,51 +479,27 @@ class TestApply:
         assert "1.775959" in message and "-0.064279" in message  # 要求值
         assert cal.applied_calibration(device) is None
 
-    def test_refuses_the_factory_path_before_touching_the_device(self, tmp_path, monkeypatch):
-        factory = write_cal(tmp_path, "factory_calibration.json")
-        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: factory)
-        device = FakeReal()
+    def test_the_factory_path_is_applied_like_any_other_file(self, tmp_path, monkeypatch):
+        """出厂标定不走特殊通道：它就是一份普通的标定文件。
 
-        with pytest.raises(cal.CalibrationFileError, match="出厂标定"):
-            cal.apply_calibration(device, factory)
-        assert device.calls == []
-        # 拒绝的理由里要说清楚怎么显式放行，否则调用方只能去读源码。
-        with pytest.raises(cal.CalibrationFileError, match="allow_factory=True"):
-            cal.apply_calibration(device, factory)
-        assert device.calls == []
-
-    def test_factory_path_is_accepted_when_explicitly_allowed(
-            self, tmp_path, monkeypatch):
-        """``allow_factory=True`` 是唯一的放行口，且放行后校验照旧。
-
-        放行的代价必须说清楚：第 2 层（按路径拒绝出厂标定）失效了，只剩第 3
-        层——「生效的端点确实是这份文件里的」。所以下面第二段仍然要抓得住静默
-        回退。
+        以前这里按路径拒绝它（要 ``allow_factory=True`` 才放行），等于把 SDK 一
+        装好就摆在眼前、且经过验证的那份参数当成嫌疑对象。现在按文件校验、按载
+        入结果校验，两条都不放松。
         """
-        factory = write_cal(tmp_path, "factory_calibration.json",
-                            closed=0.052071, open_=-1.357481)
-        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: factory)
+        factory = fake_factory(tmp_path, monkeypatch,
+                               closed=0.052071, open_=-1.357481)
 
-        device = FakeReal(closed=0.052071, open_=-1.357481)
-        applied = cal.apply_calibration(device, factory, allow_factory=True)
+        device = FakeReal()
+        applied = cal.apply_calibration(device, factory)
         assert applied.path == os.path.abspath(factory)
         assert applied.pos_closed_rad == pytest.approx(0.052071)
         assert cal.applied_calibration(device) == applied
 
-        # 放行不等于不校验：设备载入后给的是别的端点，第 3 层照样抓。
+        # 出厂标定照样要过载入后校验：设备实际给的端点不是这份文件里的，就抓。
         drifted = FakeReal(load_values=(1.775959, -0.064279))
         with pytest.raises(cal.CalibrationVerificationError):
-            cal.apply_calibration(drifted, factory, allow_factory=True)
+            cal.apply_calibration(drifted, factory)
         assert cal.applied_calibration(drifted) is None
-
-    def test_allow_factory_does_not_bypass_the_simulated_refusal(self, tmp_path):
-        """仿真设备与出厂标定是两条独立的拒绝理由，放行一条不该顺带放行另一条。"""
-        from litegrip_mujoco import DryRunGripper
-
-        path = write_cal(tmp_path, "c.json")
-        dry = DryRunGripper(realtime=False, noise=False)
-        with pytest.raises(cal.CalibrationFileError, match="仿真设备"):
-            cal.apply_calibration(dry, path, allow_factory=True)
 
     def test_false_return_is_a_failure(self, tmp_path):
         path = write_cal(tmp_path, "c.json")
@@ -595,7 +537,7 @@ class TestApply:
 
 
 class TestRequireCalibration:
-    """``require_calibration`` 是库层的入口，也是 ``allow_factory`` 的转发点。"""
+    """``require_calibration`` 是库层自己的入口：真机必须带着标定才准动。"""
 
     def test_applies_the_given_path(self, tmp_path):
         path = write_cal(tmp_path, "c.json")
@@ -605,18 +547,26 @@ class TestRequireCalibration:
         assert applied.path == os.path.abspath(path)
         assert device.config.pos_closed_rad == pytest.approx(1.775959)
 
-    def test_allow_factory_reaches_apply_calibration(self, tmp_path, monkeypatch):
-        factory = write_cal(tmp_path, "factory_calibration.json",
-                            closed=0.052071, open_=-1.357481)
-        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: factory)
+    def test_no_path_means_the_factory_calibration(self, tmp_path, monkeypatch):
+        """真机不给路径时用出厂标定，不再是「报错让调用方自己想办法」。"""
+        make_home(tmp_path, monkeypatch)
+        factory = fake_factory(tmp_path, monkeypatch)
+        device = FakeReal()
 
-        with pytest.raises(cal.CalibrationFileError, match="出厂标定"):
-            cal.require_calibration(FakeReal(), factory)
-
-        device = FakeReal(closed=0.052071, open_=-1.357481)
-        applied = cal.require_calibration(device, factory, allow_factory=True)
+        applied = cal.require_calibration(device)
         assert applied is not None
-        assert applied.pos_closed_rad == pytest.approx(0.052071)
+        assert applied.path == os.path.abspath(factory)
+        assert cal.applied_calibration(device) == applied
+
+    def test_no_factory_file_still_refuses_the_real_device(self, tmp_path, monkeypatch):
+        """出厂文件都读不出来时，真机不能被放过去 —— 这是最后一层闸。"""
+        make_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: None)
+        device = FakeReal()
+
+        with pytest.raises(cal.CalibrationRequiredError):
+            cal.require_calibration(device)
+        assert device.calls == []
 
     def test_simulated_device_needs_nothing(self, tmp_path):
         from litegrip_mujoco import DryRunGripper
@@ -693,8 +643,9 @@ class TestSdkProbe:
     例程层的 ``import_litegrip()`` 按 ``$LITEGRIP_SDK_DIR`` / 同级检出定位目录再用
     importlib 显式加载，不靠 ``sys.path`` —— 所以它常常在 ``_litegrip`` 第一次探测
     **失败之后**才把 SDK 装进来。那次失败只说明「那会儿 ``sys.path`` 上没有」。
-    把它当终局的话，SDK 明明能用而 ``HAS_SDK`` 一直是 ``False``，于是出厂标定那条
-    「必须显式 ``allow_factory=True`` 才放行」的拒绝静默失效。
+    把它当终局的话，SDK 明明能用而 ``HAS_SDK`` 一直是 ``False``，于是
+    :func:`~litegrip_mujoco.calibration.sdk_factory_calibration_path` 返回
+    ``None``——不给 ``--calibration`` 时该用的那份出厂标定就这样静默找不到了。
     """
 
     def test_adopts_an_sdk_loaded_after_a_failed_probe(self, tmp_path, monkeypatch):
@@ -873,25 +824,56 @@ class TestStrictConversions:
 
 
 class TestDualGripperGuard:
-    def test_real_device_requires_a_choice(self, tmp_path, monkeypatch):
+    def test_a_real_device_defaults_to_the_factory_calibration(self, tmp_path, monkeypatch):
+        """不给 ``calibration`` 时用出厂标定 —— 真机路径不再要求先选一份。"""
         from litegrip_mujoco import DualGripper
 
         make_home(tmp_path, monkeypatch)
+        factory = fake_factory(tmp_path, monkeypatch)
         device = FakeReal()
+
+        dual = DualGripper(real=device, render=False, mirror_first=False)
+        try:
+            assert device.calls == []          # 构造只读文件，不碰硬件
+            dual.start()
+        finally:
+            dual.disconnect()
+
+        assert dual.calibration is not None
+        assert dual.calibration.path == os.path.abspath(factory)
+        assert cal.is_calibrated(device) is True
+
+    def test_a_missing_factory_file_stops_the_real_device(self, tmp_path, monkeypatch):
+        """出厂标定都没有时，真机停在构造阶段，一台硬件都不碰。"""
+        from litegrip_mujoco import DualGripper
+
+        make_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: None)
+        device = FakeReal()
+
         with pytest.raises(cal.CalibrationRequiredError):
             DualGripper(real=device, render=False)
-        assert device.calls == []  # 一台硬件都没碰
+        assert device.calls == []
 
-    def test_default_path_is_not_used_even_when_it_exists(self, tmp_path, monkeypatch):
-        """核心需求：默认路径上放着一份可用的标定，也不许悄悄用。"""
+    def test_the_user_default_path_is_not_used_even_when_it_exists(self, tmp_path, monkeypatch):
+        """``~/.litegrip/litegrip_calibration.json`` 上有一份可用的标定，也不许拿它顶
+        替 —— 那是 SDK 的**默认用户路径**，谁写的、属于哪台夹爪都不知道。"""
         from litegrip_mujoco import DualGripper
 
         home = make_home(tmp_path, monkeypatch)
         (home / ".litegrip").mkdir()
         write_cal(home / ".litegrip", "litegrip_calibration.json")
+        factory = fake_factory(tmp_path, monkeypatch)
+        device = FakeReal()
 
-        with pytest.raises(cal.CalibrationRequiredError):
-            DualGripper(real=FakeReal(), render=False)
+        dual = DualGripper(real=device, render=False, mirror_first=False)
+        try:
+            dual.start()
+        finally:
+            dual.disconnect()
+
+        assert dual.calibration is not None
+        assert dual.calibration.path == os.path.abspath(factory)
 
     def test_apply_order_is_connect_load_enable(self, tmp_path, monkeypatch):
         from litegrip_mujoco import DualGripper
@@ -972,13 +954,28 @@ class TestDualGripperGuard:
 
 
 class TestMirrorModeGuard:
-    def test_real_device_requires_a_choice(self, tmp_path, monkeypatch):
+    def test_real_device_defaults_to_the_factory_calibration(self, tmp_path, monkeypatch):
         from litegrip_mujoco import MirrorMode, MujocoGripper
 
         make_home(tmp_path, monkeypatch)
+        factory = fake_factory(tmp_path, monkeypatch)
         sim = MujocoGripper(render=False)
+        mirror = MirrorMode(FakeReal(), sim)
+
+        assert mirror.calibration is not None
+        assert mirror.calibration.path == os.path.abspath(factory)
+
+    def test_a_missing_factory_file_stops_the_real_device(self, tmp_path, monkeypatch):
+        from litegrip_mujoco import MirrorMode, MujocoGripper
+
+        make_home(tmp_path, monkeypatch)
+        monkeypatch.setattr(cal, "sdk_factory_calibration_path", lambda: None)
+        sim = MujocoGripper(render=False)
+        device = FakeReal()
+
         with pytest.raises(cal.CalibrationRequiredError):
-            MirrorMode(FakeReal(), sim)
+            MirrorMode(device, sim)
+        assert device.calls == []
 
     def test_explicit_calibration_is_applied(self, tmp_path, monkeypatch):
         from litegrip_mujoco import MirrorMode, MujocoGripper
@@ -1097,27 +1094,33 @@ def run_example(name, *args, home, env=None):
     )
 
 
-def no_sdk(tmp_path):
-    """一个指向空目录的 ``LITEGRIP_SDK_DIR``：既没有 SDK，也没有出厂标定。
+def sdk_env(directory):
+    """把一次运行完整钉在这份 SDK 检出上（见 :func:`fake_sdk_dir`）。
 
-    出厂标定就在 SDK 包里，所以「找不到 SDK」和「找不到出厂标定」是同一件事。
-    把这一档固定下来，用例就不会因为跑测试的机器上恰好有一份 SDK 检出而改变结论。
+    ``PYTHONPATH`` 是关键的一半：``litegrip`` 是个**包名**，光换
+    ``LITEGRIP_SDK_DIR`` 挡不住开发机上另装的那一份——库层的探测走的是
+    ``import litegrip``，两条路径会各说各话。把它顶到 ``sys.path`` 最前面，
+    这次运行的「SDK」才只有一个答案。
     """
-    empty = tmp_path / "no-sdk"
-    empty.mkdir(exist_ok=True)
-    return {"LITEGRIP_SDK_DIR": empty}
+    return {"LITEGRIP_SDK_DIR": directory, "PYTHONPATH": directory}
 
 
 def fake_sdk_dir(tmp_path, **fields):
-    """造一份最小可用的 SDK 检出：只有 ``litegrip/factory_calibration.json``。
+    """造一份最小可用的 SDK 检出：``litegrip/`` 包 + 出厂标定。
 
-    例程不导入它——``--dry-run`` 不碰 CAN，只要出厂标定文件在那个位置。非
-    ``--dry-run`` 会去 ``litegrip/__init__.py``，这里没有，于是照实报「找不到
-    SDK」。
+    例程不导入它——``--dry-run`` 不碰 CAN，只要出厂标定文件在那个位置。不过库层
+    的 :func:`~litegrip_mujoco.calibration.sdk_factory_calibration_path` 是顺着
+    ``litegrip.gripper`` 的所在目录去认这份文件的，所以 ``gripper.py`` 也得在。
     """
     directory = tmp_path / "sdk"
     package = directory / "litegrip"
     package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text("")
+    (package / "gripper.py").write_text(
+        "import os\n"
+        "_FILE = os.path.join(os.path.dirname(__file__), "
+        '"factory_calibration.json")\n'
+    )
     data = {"zero_position_rad": 0.052071, "max_position_rad": -1.357481,
             "rad_to_mm": 61.01229326764816}
     data.update(fields)
@@ -1125,10 +1128,25 @@ def fake_sdk_dir(tmp_path, **fields):
     return directory
 
 
+def no_sdk(tmp_path):
+    """这条路走起来像「这台机器根本没装 SDK」：包名在，但 import 就失败。
+
+    ``__init__.py`` 里**抛 ImportError** 而不是空着：空包会让
+    ``import litegrip.gripper`` 绕过它、落到别的检出上（开发机装的那份），于是
+    这台机器上有没有 SDK 会改变用例的结论——而 CI 上恰好一份都没有。
+    """
+    directory = tmp_path / "no-sdk"
+    package = directory / "litegrip"
+    package.mkdir(parents=True, exist_ok=True)
+    (package / "__init__.py").write_text(
+        'raise ImportError("这个检出里没有 litegrip SDK")\n')
+    return sdk_env(directory)
+
+
 class TestExamples:
     @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
-    def test_refuses_to_start_without_a_tty(self, tmp_path, name):
-        """非交互终端 + 没有可选标定 ⇒ 退出码 1，且说清怎么修。
+    def test_refuses_to_start_without_a_calibration(self, tmp_path, name):
+        """找不到出厂标定、也没给 --calib ⇒ 退出码 1，且说清怎么修。
 
         退出码 1（``SystemExit(message)``）而不是 2：2 留给 argparse 自己的用法
         错误。两份真机样例与 pybullet 那套用的是同一条约定。
@@ -1148,7 +1166,7 @@ class TestExamples:
 
     @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
     def test_dry_run_does_not_ask_for_calibration(self, tmp_path, name):
-        """--dry-run 不接触真机：缺标定也照跑，且**不**弹选择器。
+        """--dry-run 不接触真机：缺标定也照跑，而且**不问人**。
 
         必须给 ``--duration``：这两个例程是常驻的镜像/遥操作循环，跑到 Esc 或
         关窗口为止。
@@ -1160,21 +1178,21 @@ class TestExamples:
                              home=home, env=no_sdk(tmp_path))
         assert result.returncode == 0, result.stdout + result.stderr
         assert "选择标定文件" not in result.stdout + result.stderr
-        assert "没找到 SDK 出厂标定" in result.stdout
+        assert "也没找到 SDK 出厂标定" in result.stdout
 
     @pytest.mark.parametrize("name", ["04_mirror_real.py", "05_dual_control.py"])
-    def test_falls_back_to_the_sdk_factory_calibration(self, tmp_path, name):
+    def test_uses_the_sdk_factory_calibration_by_default(self, tmp_path, name):
         """没给 --calib 时用 SDK 包里那份出厂标定，并说明它不是这台夹爪的。
 
-        这是照搬 pybullet 的回落顺序（``--calib`` → 出厂标定 → 交互选择）里的
-        第 2 档。它必须**先于** SDK 导入就能定下来：SDK 未必装在 ``sys.path``
-        上，而这一档的默认行为就是走它。
+        这是两档里的第 2 档，也是默认档。它必须**先于** SDK 导入就能定下来：
+        SDK 未必装在 ``sys.path`` 上（这里就只存在于 ``LITEGRIP_SDK_DIR``），而
+        这一档的默认行为就是走它。
         """
         sdk = fake_sdk_dir(tmp_path)
         result = run_example(name, "--dry-run", "--no-render",
                              "--duration", "2.5",
                              home=tmp_path / "home",
-                             env={"LITEGRIP_SDK_DIR": sdk})
+                             env=sdk_env(sdk))
         assert result.returncode == 0, result.stdout + result.stderr
         assert str(sdk / "litegrip" / "factory_calibration.json") in result.stdout
         assert "SDK 出厂标定" in result.stdout
@@ -1188,14 +1206,33 @@ class TestExamples:
         assert result.returncode == 1, result.stdout + result.stderr
         assert "nope.json" in result.stdout + result.stderr
 
-    def test_list_calibrations_finds_a_planted_file(self, tmp_path):
+    def test_dry_run_still_refuses_an_explicitly_named_bad_file(self, tmp_path):
+        """``--dry-run`` 原谅「没有标定」，不原谅「你点的那份读不出来」。
+
+        两者不一样：前者是这台机器上没有可用的标定，后者多半是路径打错了字——
+        静默跑完会让人以为那份文件是对的。
+        """
+        result = run_example("05_dual_control.py", "--dry-run", "--no-render",
+                             "--calibration", str(tmp_path / "nope.json"),
+                             home=tmp_path)
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "nope.json" in result.stdout + result.stderr
+
+    @pytest.mark.parametrize("name", ["03_trajectory.py", "04_mirror_real.py",
+                                      "05_dual_control.py"])
+    def test_list_calibrations_runs_before_the_other_gates(self, tmp_path, name):
+        """``--list-calibrations`` 是纯查询：跟 ``--dry-run``/``--headless``/
+        ``--status`` 的组合不该改变它的结论，也不该先去 import SDK。"""
         home = tmp_path / "home"
         home.mkdir()
         planted = write_cal(home, "planted.json")
 
-        result = run_example("05_dual_control.py", "--list-calibrations", home=home)
-        assert result.returncode == 0
-        assert planted in result.stdout
-        # 可用的排在前面：仓库根目录下的 .releaserc.json 之类不该挤掉真标定
-        if ".releaserc.json" in result.stdout:
-            assert result.stdout.index(planted) < result.stdout.index(".releaserc.json")
+        for extra in ([], ["--headless"], ["--dry-run"]):
+            result = run_example(name, "--list-calibrations", *extra,
+                                 home=home, env=no_sdk(tmp_path))
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert planted in result.stdout
+            # 可用的排在前面：仓库根目录下的 .releaserc.json 之类不该挤掉真标定
+            if ".releaserc.json" in result.stdout:
+                assert (result.stdout.index(planted)
+                        < result.stdout.index(".releaserc.json"))

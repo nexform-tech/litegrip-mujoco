@@ -108,10 +108,15 @@ A calibration file records the two θ endpoints of one physical gripper — `zer
 (the closed end), `max_position_rad` (the open end) and `rad_to_mm`. The host-side calibration
 tool (GUI) writes it; nothing in this package can produce one.
 
-**Every code path that moves the real gripper requires a calibration file, chosen at run
-time.** Nothing selects one for you, and the default file is never used implicitly. The reasons
-are in [Why the guard exists](#why-the-guard-exists); the short version is that the SDK's
+**Every code path that moves the real gripper requires a calibration file.** With none named,
+that file is the one the SDK ships: `factory_calibration.json`, beside the `litegrip` package.
+Nothing scans the disk for a calibration, and nothing asks you to pick one. The reasons are in
+[Why the guard exists](#why-the-guard-exists); the short version is that the SDK's
 `load_calibration()` cannot tell you which file it actually read.
+
+The factory file holds the **test-bench fixture's** measurements, not this gripper's. Whatever
+reports which file was used says so out loud, because the two are the same shape and only the
+numbers differ.
 
 ### Choosing a file
 
@@ -119,28 +124,31 @@ are in [Why the guard exists](#why-the-guard-exists); the short version is that 
 
 | Invocation | Behaviour |
 | --- | --- |
-| `--calibration PATH` | Uses that file, no prompt. This is the form for scripts and for non-interactive runs. |
-| no argument, interactive terminal | Prints the candidates with their endpoints and travel, then prompts for one. |
-| no argument, non-interactive terminal | Exits with status 2 and prints the `--calibration` form to use instead. |
+| `--calibration PATH` | Uses that file, no guesswork. This is the form for scripts and for this gripper's own measurements. |
+| no argument | Uses the SDK's factory calibration and prints its path. |
+| no argument, no factory file | Exits with status 1 and prints the `--calibration` form to use instead. |
 
 ```bash
-# List what is on this machine, then pick one — run from the repository root.
+# Find a file on this machine, then use it — run from the repository root.
 python3 examples/05_dual_control.py --list-calibrations
 python3 examples/05_dual_control.py --calibration ~/.litegrip/litegrip_calibration.json
 ```
 
-`--dry-run` moves no hardware and skips calibration selection entirely.
+`--list-calibrations` is a query, not a step in a flow: it prints the candidates, then exits 0
+without moving anything. A file it prints is passed to `--calibration` by hand.
+
+`--dry-run` moves no hardware and does not need a calibration.
 
 From Python, `calibration=` is a keyword argument, and `apply_calibration()` is the explicit
-call:
+call. Leave `calibration` out and the factory file is used; pass it and that file is used:
 
 ```python
 from litegrip_mujoco import DualGripper, MirrorMode, apply_calibration
 
 CALIBRATION = "~/.litegrip/litegrip_calibration.json"
 
-dual = DualGripper(channel="can0", can_id=0x08, calibration=CALIBRATION)
-MirrorMode(real, sim, rate_hz=50.0, calibration=CALIBRATION)
+dual = DualGripper(channel="can0", can_id=0x08)                # factory calibration
+MirrorMode(real, sim, rate_hz=50.0, calibration=CALIBRATION)  # this gripper's file
 
 real.connect()
 apply_calibration(real, CALIBRATION)   # after connect(), before enable()
@@ -149,30 +157,30 @@ real.enable()
 
 The order matters. `enable()` is the first call that energises the motor, so the calibration
 must be applied and verified above it. `apply_calibration()` raises rather than warning: on an
-unreadable or inconsistent file, on the SDK's factory file, and on a post-load `config` whose
-endpoints differ from the file's.
+unreadable or inconsistent file, and on a post-load `config` whose endpoints differ from the
+file's.
 
 ### Candidate discovery
 
-With no explicit path, the scan looks in the directory holding the SDK's default calibration
-path (`$LITEGRIP_CALIB`, else `~/.litegrip/litegrip_calibration.json`) and in the working
-directory, for `*.json` regular files. The SDK's bundled factory file is never offered. Valid
-calibrations are listed before unusable JSON, newest first.
+`discover_calibrations()` looks in the directory holding the SDK's default calibration path
+(`$LITEGRIP_CALIB`, else `~/.litegrip/litegrip_calibration.json`) and in the working directory,
+for `*.json` regular files. The SDK's bundled factory file is never offered. Valid calibrations
+are listed before unusable JSON, newest first. `--list-calibrations` prints the same list with
+each file's endpoints and travel.
 
-An explicit path always wins and is never second-guessed — including the SDK's default path.
-That file is marked `⚠ SDK default path` in the list to make the choice visible, but choosing
-it deliberately is allowed. It is only the *implicit* use that is refused.
+Discovery is read-only: it feeds the listing, never a selection. An explicit `--calibration`
+path always wins and is never second-guessed, including the SDK's default path — that one is
+marked `⚠ SDK default user path` in the listing because it is a candidate like any other, not
+the default.
 
 ### What the guard checks
 
-Three layers, because any one of them can be defeated on its own:
+Two layers, because the first one alone cannot see the SDK's silent fallback:
 
 1. The file is parsed and validated **before** the SDK sees it — required keys present, values
    numeric and finite, `rad_to_mm > 0`, and the closed endpoint numerically **larger** than the
    open one. A file that fails is never handed to the SDK.
-2. The SDK's factory calibration is refused by `realpath` identity, so relocating or symlinking
-   it does not slip through.
-3. After loading, `config.pos_closed_rad` / `pos_open_rad` are compared field-by-field against
+2. After loading, `config.pos_closed_rad` / `pos_open_rad` are compared field-by-field against
    the file. A mismatch raises and names both the requested and the observed endpoint — that is
    the signature of the SDK's silent fallback.
 
@@ -185,8 +193,8 @@ caught, not only one that never had it.
 
 A well-formed calibration file for a **different gripper of the same model** is
 indistinguishable from the right one. Nothing here can detect it. The one check available is
-arithmetic: the picker prints the travel each file implies, so read that number before trusting
-the run and compare it with the gripper's real stroke.
+arithmetic: `--list-calibrations` prints the travel each file implies, so read that number
+before trusting the file and compare it with the gripper's real stroke.
 
 ### Strict conversions
 
@@ -328,7 +336,7 @@ Calibration exports: `apply_calibration()`, `require_calibration()`,
 `select_calibration_for()`, `resolve_calibration_path()`, `discover_calibrations()`,
 `load_calibration_file()`, `default_calibration_path()`, `sdk_factory_calibration_path()`,
 `mark_calibrated()`, `applied_calibration()`, `is_calibrated()`, `is_simulated_device()`,
-`require_usable_device()`, `format_selection()`, `describe_candidate()`, the `Calibration`
+`require_usable_device()`, `describe_candidate()`, the `Calibration`
 dataclass, and the exceptions `CalibrationError`, `CalibrationRequiredError`,
 `CalibrationFileError`, `CalibrationVerificationError` and `UncalibratedDeviceError`.
 
@@ -341,10 +349,10 @@ What has been verified, and what has not:
 | Model geometry and units | ✅ Verified | `tests/test_mujoco_gripper.py::TestGeometryAndUnits` — the 87.000 mm opening, mesh units, and no self-penetration at any point in the stroke |
 | Physical fidelity of the awkward parts | ✅ Verified | `TestForceSemantics` and `TestActuator` freeze the behaviours under *Known behaviour* as tests |
 | API parity with `LiteGrip` | ✅ Verified | `TestApiParity` holds a frozen member list; with the SDK installed it compares against the real class, which on 2026-09-28 reported `refresh_status` missing — PR #4 adds it |
-| Calibration guard | ✅ Verified | `tests/test_calibration.py`, 84 cases, against a stand-in whose `load_calibration()` reproduces the SDK's silent fallback |
+| Calibration guard | ✅ Verified | `tests/test_calibration.py`, 91 cases, against a stand-in whose `load_calibration()` reproduces the SDK's silent fallback |
 | Examples 01–03 | ✅ Verified | `01` and `02` exit 0 with `--headless`; `03` records, saves and replays headless (`--dry-run`), and replays a saved file (`--play`). No hardware, no SDK |
 | Examples 04 and 05, `--dry-run` | ✅ Verified | Both exit 0 headless; 04 mirrors a scripted stand-in, 05 walks its scripted targets and keeps the position between them |
-| Example command-line contract | ✅ Verified | `--list-calibrations` exits 0; a non-interactive run with no calibration to use exits 1 and prints the guidance. 2 is left to argparse's own usage errors |
+| Example command-line contract | ✅ Verified | `--list-calibrations` exits 0 as a pure query; a run with no calibration to use and no `--calibration` exits 1 and prints the guidance. 2 is left to argparse's own usage errors |
 | Real-hardware motion | ⚠️ **Not verified** | No CAN hardware has been available. The real path is exercised only through `DryRunGripper`, which reports a 2026-09-24 calibration's θ endpoints; the SDK itself has never been driven from this package here |
 | The CAN probe (`ensure_can_link`, `--no-can-setup`) | ⚠️ **Partly verified** | Reading is verified: the parser is pinned against real `ip -details link show` transcripts (including a bus-off one where every flag looks healthy), and `probe_can_link("can0")` was run read-only against a live interface and read it correctly. The **repair** — the `sudo ip` sequence that brings a wrong interface up — has only been exercised against a stand-in `run`; nobody has watched it fix a real interface |
 
