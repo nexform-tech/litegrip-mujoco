@@ -144,7 +144,7 @@ class TestGeometryAndUnits:
             )
 
     def test_mesh_bbox_matches_urdf(self, raw):
-        """三个网格的包围盒与 litegrip-urdf 里的一致（0.1% 容差）。"""
+        """三个网格的包围盒与 litegrip-description 里的一致（0.1% 容差）。"""
         model, _ = raw
         expected = {
             "base_link": ([-0.02868784, -0.04861952, -0.07421798],

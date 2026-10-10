@@ -2,7 +2,7 @@
 
 - ``litegrip.xml``  —— 纯夹爪模型（2 自由度，无外部物体）：动力学与单位换算的基准
 - ``scene.xml``     —— 演示场景：``<include>`` 上面那个，再加地板、灯光与被夹具托住的工件
-- ``meshes/*.STL``  —— 从 `litegrip-urdf` 逐字节拷入的三个网格（注意扩展名是大写 ``.STL``）
+- ``meshes/*.STL``  —— 从 `litegrip-description` 逐字节拷入的三个网格（注意扩展名是大写 ``.STL``）
 
 用 :func:`model_path` 取绝对路径，不要手拼 —— 安装后本包可能位于 zip 之外的
 任何位置。

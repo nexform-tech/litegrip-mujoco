@@ -395,7 +395,7 @@ SDK 的 `GripperState` 带 `data_age_s`（这批数值来自多久以前的那�
 
 | 仓库 | 定位 |
 | --- | --- |
-| [litegrip-urdf](https://github.com/nexform-tech/litegrip-urdf) | URDF/xacro 描述包 —— 本模型的几何来源 |
+| [litegrip-description](https://github.com/nexform-tech/litegrip-description) | URDF/xacro 描述包 —— 本模型的几何来源 |
 | [litegrip-pybullet](https://github.com/nexform-tech/litegrip-pybullet) | 同一款夹爪的 PyBullet 仿真环境 |
 | [litearm-mujoco](https://github.com/nexform-tech/litearm-mujoco) | LiteArm 的 MuJoCo 环境，本包的形态参照它 |
 | [lite-grip](https://gitee.com/yudao_hz_1/lite-grip) | 本包对标的真机 SDK |
