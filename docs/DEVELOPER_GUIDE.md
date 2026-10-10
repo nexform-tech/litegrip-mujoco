@@ -86,8 +86,17 @@ The relationship is `gap_mm = travel_mm + 1.548`. `get_position()` reports trave
 
 ## Calibration selection and provenance
 
-Real-hardware motion requires a calibration file chosen at run time. `calibration.py` owns that
-rule; `mirror.py` and examples 04/05 enforce it by calling into it.
+Real-hardware motion requires a calibration file. With none named, that file is the SDK's
+factory calibration (`factory_calibration.json`, beside the `litegrip` package), and the rule is
+implemented once, in `resolve_calibration_path()`. `calibration.py` owns it; `mirror.py` and
+examples 04/05 enforce it by calling into it. Nothing scans the disk for a calibration and
+nothing prompts for one.
+
+**Do not** add a scan-and-pick step back into `apply_calibration()` or the examples. The SDK
+itself silently loads its factory file when a given path cannot be read, and still returns
+`True`; a picker on top of that only adds a second way to drive the motor with another
+machine's angles. To change which file is used, name it: `calibration=` in Python,
+`--calibration` on the command line.
 
 ### The two gates
 
@@ -114,21 +123,23 @@ the exemption shows up in review instead of being implied.
 applied. That second check is what catches a device that *lost* its calibration mid-run, not
 just one that never had it.
 
-### The three layers
+### The two layers
 
-`apply_calibration(device, path)` defends in three places, because each one alone is
-insufficient:
+`apply_calibration(device, path)` defends in two places, because the first one alone cannot see
+the SDK's fallback:
 
 1. **Validate before the SDK sees the file.** Existence, regular file, JSON object, the three
    required keys (`zero_position_rad`, `max_position_rad`, `rad_to_mm`), finiteness,
    `rad_to_mm > 0`, `closed > open`, and a span of at least `MIN_SPAN_RAD = 1e-3`. The SDK
    raises an unguarded `KeyError` when a file parses but lacks `rad_to_mm`, and a file with
    `closed == open` divides by zero further downstream.
-2. **Refuse the factory file by `realpath` identity.** Comparing paths as strings fails against
-   a symlink or a relative path; comparing resolved paths does not.
-3. **Compare the post-load `config` endpoints to the file's, field by field.** This is the
+2. **Compare the post-load `config` endpoints to the file's, field by field.** This is the
    load-bearing layer — it is the only one that catches the SDK's fallback — and it raises with
    both the requested and the observed endpoint, which is the signature of that fallback.
+
+The SDK's factory file gets no special treatment here: it is validated and verified like any
+other file. It used to be refused by `realpath` identity (`allow_factory=True` to pass), which
+made the default calibration the one file the library would not accept.
 
 ⚠ **Never move the `apply_calibration()` call below `enable()`.** `enable()` is the first call
 that energises the motor. The SDK's documented order is `connect() → load_calibration() →
@@ -486,17 +497,21 @@ Three layers:
   `test_exception_family_is_the_sdk_family` checks the seven exception names resolve to the SDK's
   *objects*. This layer is what catches upstream drift: when the SDK gains a field, a code or a
   method, these fail loudly instead of the simulation quietly missing it.
-- **Calibration guard** — `tests/test_calibration.py` covers discovery, validation, the picker,
-  the provenance marker and both strict conversions, against a duck-typed `LiteGrip` stand-in
-  whose `load_calibration()` can be told to reproduce the SDK's silent fallback.
+- **Calibration guard** — `tests/test_calibration.py` covers resolution (the factory file, an
+  explicit path, and the refusal when neither exists), discovery, validation, the provenance
+  marker and both strict conversions, against a duck-typed `LiteGrip` stand-in whose
+  `load_calibration()` can be told to reproduce the SDK's silent fallback.
 - **Example command-line contract** — the same file runs examples 04 and 05 as subprocesses:
-  `--list-calibrations` exits 0, a non-interactive run with no calibration to use exits 1 with
-  the guidance text, and `--dry-run` neither asks for a calibration nor fails on a missing SDK.
-  Two environment details matter. `LITEGRIP_CALIB` is set to the case's own home so a developer's
-  calibration cannot answer for it, and `LITEGRIP_SDK_DIR` is pointed at an empty directory
-  (`no_sdk()`) so a developer's own SDK checkout cannot supply the factory calibration either.
-  The resident loops get `--duration`: without it they would run until Esc or a closed window,
-  which in a test means forever.
+  `--list-calibrations` exits 0 as a pure query, a run with no calibration to use exits 1 with
+  the guidance text, and `--dry-run` never needs a calibration at all.
+  Three environment details matter. `LITEGRIP_CALIB` is set to the case's own home so a
+  developer's calibration cannot answer for it; `LITEGRIP_SDK_DIR` points at a stand-in SDK
+  checkout; and `PYTHONPATH` points there too, because `litegrip` is a *package name* — an
+  installed copy on the developer's machine would otherwise answer the library layer's
+  `import litegrip` probe and supply the factory calibration the case is trying to deny
+  (`no_sdk()` shadows it with a package that raises on import). The resident loops get
+  `--duration`: without it they would run until Esc or a closed window, which in a test means
+  forever.
 
 The suite needs no CAN interface, no hardware and no `litegrip` SDK. Cases that want the SDK skip
 themselves when it is absent.

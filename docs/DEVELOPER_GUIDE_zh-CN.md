@@ -82,8 +82,15 @@ SDK 那套 120 刻度应当**在真机侧消除，而不是在仿真侧补偿**�
 
 ## 标定的选择与来源
 
-真机运动前必须选定一份标定文件。这条规则归 `calibration.py` 管；`mirror.py` 与例程
-04/05 通过调用它来强制。
+真机运动前必须有一份标定文件。不给路径时用的那份就是 SDK 的出厂标定
+（`factory_calibration.json`，紧挨着 `litegrip` 包），规则只在
+`resolve_calibration_path()` 里实现一次。这条规则归 `calibration.py` 管；`mirror.py` 与
+例程 04/05 通过调用它来强制。没有任何地方去扫盘找标定，也没有任何地方问你要哪一份。
+
+**不要把「扫盘 + 挑一份」重新加回** `apply_calibration()` 或例程里。SDK 自己在给定路径
+读不出来时会静默装载出厂文件并且照样返回 `True`；在它上面再叠一个选择器，只是多出一条
+「用别人的角度驱动电机」的路。要换标定就点名：Python 里传 `calibration=`，命令行上传
+`--calibration`。
 
 ### 两道闸
 
@@ -108,18 +115,20 @@ SDK 那套 120 刻度应当**在真机侧消除，而不是在仿真侧补偿**�
 与已套用的标定不一致时抛 `CalibrationVerificationError`。这后一步抓的是**跑着跑着丢掉
 标定**的设备，不只是从没标定过的。
 
-### 三层防线
+### 两层防线
 
-`apply_calibration(device, path)` 在三个地方设防，因为单独任何一层都不够：
+`apply_calibration(device, path)` 在两个地方设防，因为只有第一层看不出 SDK 的静默回落：
 
 1. **在 SDK 拿到文件之前先校验。** 存在性、是普通文件、是 JSON 对象、三个必填键
    （`zero_position_rad`、`max_position_rad`、`rad_to_mm`）、取值有限、`rad_to_mm > 0`、
    `closed > open`，以及跨度不小于 `MIN_SPAN_RAD = 1e-3`。SDK 在"文件能解析但缺
    `rad_to_mm`"时会抛出没被守卫的 `KeyError`；而 `closed == open` 的文件会在下游除零。
-2. **按 `realpath` 认身份拒绝出厂文件。** 按字符串比路径会被软链接和相对路径绕过，
-   按解析后的真实路径比就不会。
-3. **载入后把 `config` 端点与文件逐字段比对。** 这是承重的一层 —— 只有它抓得住 SDK 的
+2. **载入后把 `config` 端点与文件逐字段比对。** 这是承重的一层 —— 只有它抓得住 SDK 的
    静默回落 —— 报错时同时给出"请求的端点"和"实际读到的端点"，那正是回落的特征。
+
+SDK 的出厂文件在这里没有任何特殊通道：它和别的文件一样被校验、被核实。以前它按
+`realpath` 认身份被拒（要 `allow_factory=True` 才放行），结果是「库层唯一不肯接受的文件，
+恰好就是那个默认标定」。
 
 ⚠ **绝对不要把 `apply_calibration()` 挪到 `enable()` 下面。** `enable()` 是第一个给电机
 上电的调用。SDK 文档给的顺序是 `connect() → load_calibration() → enable()`，
@@ -444,15 +453,17 @@ python -m pytest tests/ -v
   枚举和常量类对着已安装的 SDK 逐字段比对，`test_exception_family_is_the_sdk_family`
   检查 7 个异常名解析到的是 SDK 的**类对象**。这一层专门抓上游漂移：SDK 多一个
   字段、多一个错误码、多一个方法，它会响亮地失败，而不是让仿真悄悄缺一块。
-- **标定闸** —— `tests/test_calibration.py` 覆盖发现、校验、选择器、来源标记与两个严格
-  换算，对象是一个鸭子类型的 `LiteGrip` 替身，可以让它的 `load_calibration()` 复现 SDK
-  的静默回落。
-- **例程命令行契约** —— 同一个文件把例程 04/05 当子进程跑：`--list-calibrations` 退出码
-  0；非交互且没有可用标定时退出码 1 并打印指引；`--dry-run` 既不问标定，也不会因为缺
-  SDK 而失败。这里有两个环境细节是必须的：`LITEGRIP_CALIB` 指向用例自己的 home，免得
-  开发者自己的标定替它作答；`LITEGRIP_SDK_DIR` 指向一个空目录（`no_sdk()`），免得
-  开发者自己的 SDK 检出把出厂标定递过来。常驻循环都带 `--duration`：不带的话它们会一直
-  跑到 Esc 或关窗，在测试里就是永远。
+- **标定闸** —— `tests/test_calibration.py` 覆盖解析（出厂标定、显式路径，以及两者都没有
+  时的拒绝）、发现、校验、来源标记与两个严格换算，对象是一个鸭子类型的 `LiteGrip` 替身，
+  可以让它的 `load_calibration()` 复现 SDK 的静默回落。
+- **例程命令行契约** —— 同一个文件把例程 04/05 当子进程跑：`--list-calibrations` 是纯查询，
+  退出码 0；没有可用标定又没给 `--calibration` 时退出码 1 并打印指引；`--dry-run` 根本
+  不需要标定。这里有三个环境细节是必须的：`LITEGRIP_CALIB` 指向用例自己的 home，免得
+  开发者自己的标定替它作答；`LITEGRIP_SDK_DIR` 指向一份自造的 SDK 检出；`PYTHONPATH`
+  也指向它 —— 因为 `litegrip` 是个**包名**，开发机上装着的那份会替库层的
+  `import litegrip` 探测作答、把用例正想否认掉的那份出厂标定递过来（`no_sdk()` 用一份
+  import 就抛错的包把它顶掉）。常驻循环都带 `--duration`：不带的话它们会一直跑到 Esc
+  或关窗，在测试里就是永远。
 
 测试套件不需要 CAN 接口、不需要硬件、不需要 `litegrip` SDK。需要 SDK 的用例在
 SDK 缺席时自行 skip。

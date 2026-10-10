@@ -77,8 +77,8 @@ def _probe() -> Optional[Any]:
       第一次探测**失败之后**才把 SDK 装进来。当初那次失败只是说明「那会儿
       ``sys.path`` 上没有」，把它当终局的话，SDK 明明能用而 ``HAS_SDK`` 一直是
       ``False``，于是 :func:`~litegrip_mujoco.sdk_factory_calibration_path` 返回
-      ``None``，出厂标定那条「必须显式 ``allow_factory=True`` 才放行」的拒绝就
-      静默失效了。
+      ``None``，而不给 ``--calibration`` 时的默认标定就这样静默找不到了——本该
+      用出厂标定跑通的运行会直接报「没有可用的标定文件」。
     * 反过来，它也会**换掉** ``sys.modules["litegrip"]``（同名检出与已安装的包
       并存时，正是靠这一手点名用哪一份）。库里攥着旧对象不放，两边的
       ``GripperState`` 就成了两个类，``isinstance`` 会莫名其妙地假。

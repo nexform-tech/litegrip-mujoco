@@ -1,10 +1,16 @@
 """Calibration selection, validation, and provenance.
 
-Every code path that moves real hardware must be handed a calibration file
-that the operator chose on purpose. This module is what makes "chose on
-purpose" enforceable: it finds candidate files, validates them before the SDK
-ever sees them, prompts for a choice when running on a terminal, and stamps the
-device so the conversion helpers can tell a calibrated device from a bare one.
+Every code path that moves real hardware ends up with a calibration file. The
+default is the read-only factory calibration shipped inside the SDK package;
+naming another one with ``--calibration`` is how a run is pointed at a specific
+gripper instead. This module validates whichever file is used before the SDK
+ever sees it, and stamps the device so the conversion helpers can tell a
+calibrated device from a bare one.
+
+The factory file is a usable set of defaults, not a measurement of the machine
+in front of you: it is the test-bench fixture's geometry. That is why a run that
+falls back to it says so out loud rather than letting an operator believe it is
+their gripper's numbers.
 
 Why a separate module
 ---------------------
@@ -28,7 +34,8 @@ numbers. On top of that, a file that parses but lacks a required key raises an
 uncaught ``KeyError`` from inside the SDK.
 
 This module closes all three: it validates the file *before* the SDK is called,
-verifies the endpoints *after*, and refuses the factory file by path.
+verifies the endpoints *after*, and keeps the factory file's provenance visible
+instead of silent.
 
 The invariant
 -------------
@@ -53,12 +60,11 @@ from __future__ import annotations
 import json
 import math
 import os
-import sys
 import time
 import warnings
 import weakref
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .gripper import _default_calib_path
 
@@ -94,10 +100,11 @@ class CalibrationError(RuntimeError):
 
 
 class CalibrationRequiredError(CalibrationError):
-    """A run that can move real hardware was started without choosing a file.
+    """A run that can move real hardware has no calibration file to use.
 
-    Raised when no path was given, none could be prompted for (not a
-    terminal), or the operator declined to pick one.
+    Raised when no path was given and the SDK's factory calibration cannot be
+    read either — there is nothing to fall back to, and guessing is not an
+    option.
     """
 
 
@@ -167,7 +174,9 @@ class Calibration:
     def is_sdk_default_path(self) -> bool:
         """True when this is the SDK's default user path.
 
-        Selectable when chosen on purpose, never selected implicitly.
+        ``~/.litegrip/litegrip_calibration.json`` (or ``$LITEGRIP_CALIB``): what
+        the SDK itself would load with no path, and what a bare
+        ``LiteGrip`` uses.
         """
         return _same_file(self.path, default_calibration_path())
 
@@ -175,13 +184,15 @@ class Calibration:
     def is_sdk_factory_path(self) -> bool:
         """True when this is the read-only calibration shipped in the SDK.
 
-        Refused outright: it belongs to no machine in particular.
+        This is the default a run uses when nothing else is named. It carries
+        the bench fixture's measurements, so anything that reports which file
+        was used has to say so.
         """
         factory = sdk_factory_calibration_path()
         return factory is not None and _same_file(self.path, factory)
 
     def describe(self) -> str:
-        """One-line summary for console output and the picker."""
+        """One-line summary for console output and listings."""
         stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(self.mtime))
         return (
             f"closed={self.pos_closed_rad:+.6f} rad  "
@@ -369,41 +380,22 @@ def load_calibration_file(path: Any) -> Calibration:
     )
 
 
-def format_selection(path: Any) -> str:
-    """Console block announcing the calibration a run settled on.
-
-    Printed right after the choice, so the operator can see which file the
-    numbers in the report came from, and copy the ``--calibration`` line for
-    the next non-interactive run.
-    """
-    calibration = load_calibration_file(path)
-    lines = [
-        f"[标定] 已选择: {calibration.path}",
-        f"       {calibration.describe()}",
-    ]
-    if calibration.is_sdk_default_path:
-        lines.append("       ⚠ 这是 SDK 的默认路径 —— 本包绝不自己选它，是你显式选的。")
-    lines.append(f"       下次非交互运行: --calibration {calibration.path}")
-    return "\n".join(lines)
-
-
 def describe_candidate(path: Any) -> str:
     """One-line status of a candidate file, valid or not.
 
     Invalid files are described, never hidden: a typo in a key has to be
-    visible in the picker, not silently filtered out.
+    visible in the listing, not silently filtered out.
     """
     try:
         cal = load_calibration_file(path)
     except CalibrationError as exc:
         return f"⚠ 不可用：{exc}"
 
-    tag = ""
     if cal.is_sdk_factory_path:
-        tag = "  ⚠ SDK 出厂标定（本包默认拒绝，需显式 allow_factory=True）"
-    elif cal.is_sdk_default_path:
-        tag = "  ⚠ SDK 默认路径（未显式指定时本包绝不使用）"
-    return f"{cal.describe()}{tag}"
+        return f"{cal.describe()}  ⚠ SDK 出厂标定（不给 --calibration 时的默认值）"
+    if cal.is_sdk_default_path:
+        return f"{cal.describe()}  ⚠ SDK 默认用户路径（不给 --calibration 时不会被自动选中）"
+    return cal.describe()
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -512,156 +504,63 @@ def _is_selectable(path: str) -> bool:
 # ═════════════════════════════════════════════════════════════════════════
 
 
-def _stdin_is_tty() -> bool:
-    try:
-        return bool(sys.stdin is not None and sys.stdin.isatty()
-                    and sys.stdout is not None and sys.stdout.isatty())
-    except (AttributeError, ValueError):  # pragma: no cover - 关闭的流
-        return False
+def _no_choice_message(reason: str) -> str:
+    return "\n".join([
+        f"[错误] 这次运行没有可用的标定文件：{reason}",
+        "  默认用的是 SDK 包里那份出厂标定（台架夹具的实测参数）；"
+        "要按这台夹爪",
+        "  自己的尺寸驱动，请显式指定上位机保存的那份：",
+        "     --calibration <路径>",
+        "  标定文件由上位机标定后保存：litegrip-studio / litegrip-console，"
+        "或 SDK",
+        "  自带的 tools/gui/litegrip_gui.py。",
+        "  要看看本机有哪些候选：--list-calibrations",
+    ])
 
 
-def _no_choice_message(candidates: Sequence[str], reason: str) -> str:
-    lines = [f"[错误] 真机运动前必须先选择标定文件：{reason}"]
-    if candidates:
-        lines.append("  候选（均在未选择状态）:")
-        for index, path in enumerate(candidates, start=1):
-            lines.append(f"    {index}) {path}")
-            lines.append(f"       {describe_candidate(path)}")
-        lines.append("  请显式指定：--calibration <上面任意一项>")
-    else:
-        lines.append("  没有找到任何候选标定文件。")
-        lines.append("  标定文件由上位机（GUI）标定后生成；")
-        lines.append(f"  默认写在 {os.path.dirname(default_calibration_path())}"
-                     "，也可以放在当前目录。")
-        lines.append("  请显式指定：--calibration <路径>")
-    lines.append("  或用 --dry-run 在无硬件下跑通全流程（不需要标定）。")
-    return "\n".join(lines)
-
-
-def _match_selection(answer: str, candidates: Sequence[str]) -> Optional[str]:
-    """Turn one line of input into a candidate path, or ``None``."""
-    text = answer.strip().strip("'\"")
-    if not text:
-        return None
-    if text.isdigit():
-        index = int(text)
-        if 1 <= index <= len(candidates):
-            return candidates[index - 1]
-        return None
-    expanded = os.path.abspath(os.path.expanduser(text))
-    if os.path.isfile(expanded):
-        return expanded
-    for candidate in candidates:
-        if os.path.basename(candidate) == text:
-            return candidate
-    return None
-
-
-def prompt_for_calibration(
-    candidates: Sequence[str],
-    *,
-    input_fn: Optional[Callable[[str], str]] = None,
-    is_tty: Optional[bool] = None,
-) -> str:
-    """Ask the operator which calibration file to use.
-
-    Interactive by design: the whole point is that a human picks the file
-    rather than the program picking one for them.
-
-    Args:
-        candidates: Paths to offer.
-        input_fn: Replacement for :func:`input`, for tests.
-        is_tty: Override the terminal check, for tests.
-
-    Returns:
-        The chosen path.
-
-    Raises:
-        CalibrationRequiredError: Not a terminal (so no picker can be shown),
-            no candidates, or the operator quit.
-    """
-    candidates = list(candidates)
-    if is_tty is None:
-        is_tty = _stdin_is_tty()
-    if not is_tty:
-        raise CalibrationRequiredError(
-            _no_choice_message(candidates, "当前不是交互终端，无法弹出选择器")
-        )
-    if not candidates:
-        raise CalibrationRequiredError(
-            _no_choice_message(candidates, "没有可选的标定文件")
-        )
-
-    ask = input_fn if input_fn is not None else input
-    while True:
-        print("\n真机运动前必须选择标定文件（标定文件由上位机标定获得）:")
-        for index, path in enumerate(candidates, start=1):
-            print(f"  {index}) {path}")
-            print(f"       {describe_candidate(path)}")
-        print("  输入序号或完整路径；q 放弃并退出。")
-        try:
-            answer = ask("标定文件> ")
-        except EOFError:
-            raise CalibrationRequiredError(
-                _no_choice_message(candidates, "输入流已关闭，无法选择")
-            ) from None
-
-        if answer.strip().lower() in ("q", "quit", "exit"):
-            raise CalibrationRequiredError(
-                _no_choice_message(candidates, "操作者放弃了选择")
-            )
-
-        chosen = _match_selection(answer, candidates)
-        if chosen is None:
-            print("  ⚠ 无法识别这个输入，请重新选择。")
-            continue
-        try:
-            load_calibration_file(chosen)
-        except CalibrationError as exc:
-            print(f"  ⚠ {exc}\n     换一个文件。")
-            continue
-        return chosen
-
-
-def resolve_calibration_path(
-    explicit: Optional[str] = None,
-    *,
-    interactive: bool = True,
-    input_fn: Optional[Callable[[str], str]] = None,
-    is_tty: Optional[bool] = None,
-    extra_dirs: Optional[Sequence[str]] = None,
-) -> str:
+def resolve_calibration_path(explicit: Optional[str] = None) -> str:
     """Decide which calibration file this run will use.
 
-    An explicit path always wins and is validated immediately. Otherwise the
-    operator is asked. There is deliberately **no** fallback to the default
-    path: a default chosen by the program is exactly what this is here to
-    prevent.
+    Two tiers, and the order is the priority:
+
+    1. *explicit* — a path from ``--calibration`` — always wins and is
+       validated immediately.
+    2. Otherwise the SDK's packaged factory calibration, which is the default:
+       it ships with the package, so a fresh machine runs without hunting for
+       a file.
+
+    There is no third tier. When neither works, this raises instead of scanning
+    the machine for candidates: guessing which JSON belongs to which gripper is
+    not something this package can do. Use :func:`discover_calibrations` to list
+    them for a human, who then names one.
 
     Args:
         explicit: Path from ``--calibration``, or ``None``.
-        interactive: Whether prompting is allowed.
-        input_fn: Replacement for :func:`input`, for tests.
-        is_tty: Override the terminal check, for tests.
-        extra_dirs: Extra directories to scan for candidates.
 
     Returns:
         The chosen, validated path.
 
     Raises:
-        CalibrationRequiredError: No path was given and none could be chosen.
+        CalibrationRequiredError: No path was given and the SDK ships no
+            readable factory calibration.
         CalibrationFileError: The explicit path does not exist or is invalid.
     """
     if explicit:
         load_calibration_file(explicit)  # 先验，出错时信息里带的是文件问题
         return os.path.abspath(os.path.expanduser(str(explicit)))
 
-    candidates = discover_calibrations(None, extra_dirs=extra_dirs)
-    if not interactive:
+    factory = sdk_factory_calibration_path()
+    if factory is None:
         raise CalibrationRequiredError(
-            _no_choice_message(candidates, "没有指定 --calibration")
+            _no_choice_message("没有指定 --calibration，也没找到 SDK 自带的出厂标定")
         )
-    return prompt_for_calibration(candidates, input_fn=input_fn, is_tty=is_tty)
+    try:
+        load_calibration_file(factory)
+    except CalibrationError as exc:
+        raise CalibrationRequiredError(
+            _no_choice_message(f"SDK 自带的出厂标定读不出来（{exc}）")
+        ) from None
+    return factory
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -763,54 +662,39 @@ def apply_calibration(
     path: Any,
     *,
     verify: bool = True,
-    allow_factory: bool = False,
 ) -> Calibration:
     """Load a calibration file into a device and verify it took effect.
 
-    Three layers, because the SDK's silent fallback is not detectable by any
-    single one of them:
+    Two layers, because the SDK's silent fallback is not detectable by either
+    one alone:
 
     1. The file is validated before the SDK sees it
        (:func:`load_calibration_file`), so the fallback's triggers — a missing
        file, a malformed one — cannot occur.
-    2. The SDK's factory calibration is refused by path, which catches the
-       case where the file *is* readable but is a copy of it.
-    3. The endpoints observed after loading must equal the file's exactly.
+    2. The endpoints observed after loading must equal the file's exactly.
        This covers the residual race (the file replaced between our read and
        the SDK's) and any future change to the SDK's fallback.
+
+    The SDK's packaged factory calibration is an ordinary file here: it is the
+    default a run uses when nothing is named. It holds the *test-bench
+    fixture's* measured endpoints, not this gripper's, so whatever reports
+    which file was used has to say that out loud —
+    ``examples/_common.open_real_gripper`` prints the path for exactly this
+    reason.
 
     Args:
         device: The gripper to configure.
         path: The calibration file.
-        verify: Whether to run layer 3. Leave this on.
-        allow_factory: Accept the SDK's packaged factory calibration.
-            **Off by default, and it should stay off** unless the caller has
-            no better option. That file is the *test-bench fixture's* measured
-            endpoints, not this gripper's: it is a usable set of defaults, not
-            a calibration of the machine in front of you. Turning this on
-            means layer 2 stops protecting you, so say so where the operator
-            can see it (``examples/_common.open_real_gripper`` prints the
-            path it used for exactly this reason). Only layer 3 still holds:
-            the endpoints in effect are the ones in the factory file.
+        verify: Whether to run layer 2. Leave this on.
 
     Returns:
         The validated file that was applied.
 
     Raises:
-        CalibrationFileError: The file is invalid, or is the SDK's factory
-            calibration and *allow_factory* is off, or the device is
-            simulated.
+        CalibrationFileError: The file is invalid, or the device is simulated.
         CalibrationVerificationError: The device did not take the values.
     """
     calibration = load_calibration_file(path)
-
-    if calibration.is_sdk_factory_path and not allow_factory:
-        raise CalibrationFileError(
-            f"拒绝使用 SDK 自带的出厂标定: {calibration.path}\n"
-            "       它不属于任何一台具体夹爪。请用上位机标定你自己的夹爪。\n"
-            "       确实要拿它当默认值用（它在台架夹具上量过，能满足闭合位比张开位"
-            "更正的判据），显式传 allow_factory=True，并把这个选择告诉操作员。"
-        )
 
     if is_simulated_device(device):
         raise CalibrationFileError(
@@ -887,10 +771,6 @@ def select_calibration_for(
     path: Optional[str] = None,
     *,
     allow_uncalibrated: bool = False,
-    interactive: bool = True,
-    input_fn: Optional[Callable[[str], str]] = None,
-    is_tty: Optional[bool] = None,
-    extra_dirs: Optional[Sequence[str]] = None,
 ) -> Optional[str]:
     """Decide which calibration *device* will use, without loading it yet.
 
@@ -900,12 +780,8 @@ def select_calibration_for(
 
     Args:
         device: The gripper.
-        path: Calibration file, or ``None`` to ask.
+        path: Calibration file, or ``None`` for the SDK's factory calibration.
         allow_uncalibrated: Skip the requirement and record the opt-out.
-        interactive: Whether prompting is allowed.
-        input_fn: Replacement for :func:`input`, for tests.
-        is_tty: Override the terminal check, for tests.
-        extra_dirs: Extra directories to scan for candidates.
 
     Returns:
         The path to apply later, or ``None`` when nothing needs applying
@@ -931,13 +807,7 @@ def select_calibration_for(
         mark_calibrated(device, None, reason="allow_uncalibrated=True")
         return None
 
-    return resolve_calibration_path(
-        None,
-        interactive=interactive,
-        input_fn=input_fn,
-        is_tty=is_tty,
-        extra_dirs=extra_dirs,
-    )
+    return resolve_calibration_path(None)
 
 
 def require_calibration(
@@ -945,28 +815,18 @@ def require_calibration(
     path: Optional[str] = None,
     *,
     allow_uncalibrated: bool = False,
-    allow_factory: bool = False,
-    interactive: bool = True,
-    input_fn: Optional[Callable[[str], str]] = None,
-    is_tty: Optional[bool] = None,
-    extra_dirs: Optional[Sequence[str]] = None,
 ) -> Optional[Calibration]:
     """Make sure *device* is usable, choosing and applying a file if needed.
 
     This is the entry point library callers use. It is a no-op for simulated
     devices, applies *path* when given, accepts a device that already carries
-    a provenance marker, and otherwise asks the operator — never defaulting.
+    a provenance marker, and otherwise uses the SDK's packaged factory
+    calibration.
 
     Args:
         device: The gripper.
-        path: Calibration file, or ``None`` to ask.
+        path: Calibration file, or ``None`` for the SDK's factory calibration.
         allow_uncalibrated: Skip the requirement and record the opt-out.
-        allow_factory: Passed through to :func:`apply_calibration`; see there
-            for why you probably want the default.
-        interactive: Whether prompting is allowed.
-        input_fn: Replacement for :func:`input`, for tests.
-        is_tty: Override the terminal check, for tests.
-        extra_dirs: Extra directories to scan for candidates.
 
     Returns:
         The calibration applied, or ``None`` for a simulated or opted-out
@@ -977,17 +837,11 @@ def require_calibration(
         CalibrationError: The chosen file is invalid or did not take effect.
     """
     chosen = select_calibration_for(
-        device,
-        path,
-        allow_uncalibrated=allow_uncalibrated,
-        interactive=interactive,
-        input_fn=input_fn,
-        is_tty=is_tty,
-        extra_dirs=extra_dirs,
+        device, path, allow_uncalibrated=allow_uncalibrated
     )
     if chosen is None:
         return applied_calibration(device)
-    return apply_calibration(device, chosen, allow_factory=allow_factory)
+    return apply_calibration(device, chosen)
 
 
 def require_usable_device(device: Any, *, action: str) -> None:
@@ -1008,8 +862,10 @@ def require_usable_device(device: Any, *, action: str) -> None:
     if _provenance(device) is None:
         raise UncalibratedDeviceError(
             f"{type(device).__name__} 没有标定来源，不能{action}。\n"
-            "       真机必须先选择标定文件：apply_calibration(device, path)，"
-            "或 DualGripper(calibration=path)。\n"
+            "       真机必须先载入一份标定：apply_calibration(device, path)，"
+            "或 DualGripper(calibration=path)；\n"
+            "       缺省那份是 SDK 自带的出厂标定，"
+            "用 resolve_calibration_path(None) 拿到它的路径。\n"
             "       确实要用当前 config 硬跑，可以显式 mark_calibrated(device, None, "
             "reason=...)。"
         )

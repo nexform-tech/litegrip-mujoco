@@ -15,10 +15,11 @@
   --status   只连、只读，不发运动指令；加 --clear-fault 顺手清掉锁死的故障
   --dry-run  只开窗口，绝不碰 CAN —— 第一次跑先跑这个
 
-前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK · 有一份
-      这台夹爪的标定（不给 --calib 就用 SDK 出厂那份）· 有可用的显示：目标由键盘给，
-      没有窗口就改不动（--status 和 --dry-run --headless 不需要）。装 SDK、选标定、
-      错误码、为什么要自己发帧见 examples/README.zh-CN.md。
+前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK（不给
+      --calib 就用它自带的出厂标定；要按这台夹爪自己的尺寸驱动，用 --calib 指
+      上位机保存的那份）· 有可用的显示：目标由键盘给，没有窗口就改不动（--status
+      和 --dry-run --headless 不需要）。装 SDK、选标定、错误码、为什么要自己发帧见
+      examples/README.zh-CN.md。
 """
 import argparse
 import math
@@ -37,6 +38,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_mujoco)
     fraction_to_target_rad,
     fresh_state,
     import_litegrip,
+    list_calibrations,
     make_sim,
     open_real_gripper,
     rad_to_fraction,
@@ -569,7 +571,7 @@ def run_status(args):
     过」），寄存器照读、退出码照常按那里的故障判定给。想让电机开口就先使能，也就是
     跑不带 ``--status`` 的本样例。
 
-    标定照样要先选：读回来的位置要换成开度，靠的就是标定的角度和 ``rad_to_mm``
+    标定照样要先定下来：读回来的位置要换成开度，靠的就是标定的角度和 ``rad_to_mm``
     ——用别台机器的刻度换算，打出来的百分比是错的，而这条路径存在的意义就是让这个
     百分比可信。
 
@@ -678,6 +680,10 @@ def run_status(args):
 
 def main():
     args = parse_args()
+    # 放在 --status / --headless 之前：`--list-calibrations` 是一次查询，不该被
+    # 「要看窗口」「只读状态」这些门挡住。
+    if args.list_calibrations:
+        return list_calibrations()
     if args.status:
         return run_status(args)
     if args.headless and not args.dry_run:
@@ -700,7 +706,7 @@ def main():
             print("   --headless：没有窗口就没有键盘，目标改由一段脚本给"
                   f"（{len(SCRIPT_STEPS)} 段，每段走 {SCRIPT_MOVE_S:g} s 停一下，"
                   f"周期 {_SCRIPT_PERIOD_S:g} s）——它顶替的是「那只手」")
-        # dry-run 也要先选标定：目标角和毫米刻度都由它决定，真机跑的就是这一套。
+        # dry-run 也要先把标定定下来：目标角和毫米刻度都由它决定，真机跑的就是这一套。
         # 不碰 CAN。
         gripper = open_real_gripper(args, dry_run=True, noise=args.noise)
         live = False

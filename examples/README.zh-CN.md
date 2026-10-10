@@ -458,14 +458,25 @@ python3 examples/05_dual_control.py            # 不给 --calib：用 SDK 的出
 不给 `--calib` 时用的是 SDK 包里那份标定（`factory_calibration.json`，与 `litegrip`
 包的 `__init__.py` 同级），启动时会说明。路径从包目录解析，换电脑也跟着检出走。
 **那份文件存的是出厂台架夹具的实测参数，不是你这台夹爪的**：它的行程端点可能和眼前这
-台对不上。除了第一次看看，都请给 `--calib`。`--dry-run` 解析的是同一份文件，因为就算
-不发 CAN 报文，目标角度和毫米刻度也来自它。
+台对不上。除了第一次看看，都请给 `--calib`。
 
-只有当出厂文件也读不出来时，才会列出 `~/.litegrip` 下的候选，带 mtime 和关键值
-（闭合/张开角、`rad_to_mm`、`kp`、`mst_id`），你按编号选或直接敲路径。上位机给仿真
-后端写的 `*.sim.json` 和 `*.bak` 备份永远不会被列出，显式点名 `*.sim.json` 也会被拒
-——它的刻度属于仿真夹爪。没有终端可问（管道、脚本、CI）或没有可选项时，运行以退出码 1
-停下，并说明怎么拿到标定、怎么传进来。
+不扫盘，也不给选项让你挑。一次运行只读**一个**文件：`--calib` 给的那份，否则就是
+SDK 的出厂标定。两份都读不出来时，它以退出码 1 停下并打印该用的 `--calib` 写法——
+绝不去猜这台机器上散着的 JSON 里哪份是对的。
+
+想不猜就找到文件，用 `--list-calibrations`。它是一次查询：列出候选和关键值
+（闭合/张开角、`rad_to_mm`、`kp`、`mst_id`），然后以 0 退出。
+
+```bash
+python3 examples/05_dual_control.py --list-calibrations
+```
+
+上位机给仿真后端写的 `*.sim.json` 和 `*.bak` 备份永远不会被列出，显式点名
+`*.sim.json` 也会被拒——它的刻度属于仿真夹爪。
+
+`--dry-run` 不动真机，也就不需要标定：替身报自己的角度，读不到的东西不会读错。想让
+这次运行说一说真机那条路会用哪份文件，照样传 `--calib`。03 用同一套解析；04 和 05 共用
+`open_real_gripper`。
 
 那份文件来自在上位机（`litegrip-studio` / `litegrip-console`，或 SDK 自带的
 `tools/gui/litegrip_gui.py`）里对**这台**夹爪标定后保存。这一点很重要，因为 SDK 的
@@ -492,7 +503,8 @@ CAN 探测只有「读」那一半验证过：解析器钉的是 `ip -details li
 [`_common.py`](_common.py) 被五个样例共用，它自己不是样例。里面放着参数解析
 （`add_common_args()`、`add_hardware_args()`）、SDK 发现（`import_litegrip()`、
 `sdk_dir()`、`check_sdk_api()`）、标定解析（`choose_calibration_file()`、
-`factory_calibration_path()`、候选列表、「文件是否真的生效」的检查）、连接使能序列
+`factory_calibration_path()`、`is_sdk_factory_calibration()`、候选列表、
+「文件是否真的生效」的检查）、连接使能序列
 （`open_real_gripper()`）、CAN 接口探测（`ensure_can_link()`）、`make_sim()`、
 `fresh_state()`、单位换算和状态行。所以每个样例都是先 `from _common import ...`，
 **再** import `litegrip_mujoco`。

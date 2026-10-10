@@ -16,7 +16,8 @@
   ensure_can_link()  连接之前探测 CAN 接口；状态不对才用 sudo 把它拉起来
                      （照上位机 litegrip-studio 的流程；--no-can-setup 可关掉）
   choose_calibration_file() 定下这次用**哪一份**标定：--calib 指定 → SDK 出厂
-                      标定 → 两个都没有才当场从候选里选
+                      标定；两个都没有就直接退出（不扫盘、不提问）
+  list_calibrations() --list-calibrations：列出本机候选标定文件后退出（纯查询）
   open_real_gripper() 选标定 → 连接 → 载入并核实标定 → 使能，失败时给出可读的提示
   fresh_state()       等到一帧**新**的状态帧再读位置；等不到返回 None
                       （读真机位置只该走这里，别直接读 get_state() 的缓存）
@@ -33,9 +34,10 @@
   3) 先用 --dry-run 跑一遍看看流程。
 
 不指定 ``--calib`` 时用的是 SDK 包里那份**出厂标定**——它是台架夹具的实测参数，
-而标定的角度/毫米刻度本该是每台夹爪单独量的。拿不准就用 ``--calib`` 指这台夹爪
-自己的那份：上位机 ``litegrip-studio`` / ``litegrip-console`` 标定后保存，或
-SDK 自带的 ``tools/gui/litegrip_gui.py``。
+而标定的角度/毫米刻度本该是每台夹爪单独量的。换标定只有一个办法：用 ``--calib``
+指这台夹爪自己的那份（上位机 ``litegrip-studio`` / ``litegrip-console`` 标定后
+保存，或 SDK 自带的 ``tools/gui/litegrip_gui.py``）。样例**不扫盘**：出厂文件也
+读不出来就直接退出；要列本机候选就用 ``--list-calibrations``。
 
 真机跑之前确认 CAN 已配置好。这一步**不用你手动做**：三个真机样例在连接前会探测
 接口，只在它真的不对时（没 up / 比特率不对 / 控制器 BUS-OFF）才用 sudo 配一次，
@@ -58,7 +60,8 @@ SDK 自带的 ``tools/gui/litegrip_gui.py``。
 * ``status_line()`` 的毫米数一律是**本仓的真实毫米**（``constants.MM_SCALE`` =
   85.452 mm 全行程），不引入 SDK 名义的 120 mm 刻度，所以没有 ``sdk_mm`` 那一栏。
 * ``choose_calibration_file()`` 走库层的 :func:`apply_calibration`（它比 pybullet
-  那版多一道「载入后核对端点」），出厂标定靠显式的 ``allow_factory=True`` 打开。
+  那版多一道「载入后核对端点」）；两档（``--calib`` → 出厂标定）在两边现在完全
+  一致，出厂标定是一份普通文件，不再需要单独的开关放行。
 """
 from __future__ import annotations
 
@@ -108,6 +111,7 @@ __all__ = [
     "fraction_to_target_rad",
     "fresh_state",
     "import_litegrip",
+    "is_sdk_factory_calibration",
     "list_calibrations",
     "make_sim",
     "manual_can_hint",
@@ -437,12 +441,13 @@ def add_hardware_args(parser: argparse.ArgumentParser) -> None:
         help="标定文件路径（--calibration 是同一个参数的旧名）。不给就用 SDK "
              "包里那份**出厂标定**（台架夹具的实测参数，跟着 SDK 包走，换电脑也"
              "指得到）；要按这**台**夹爪自己的尺寸驱动，就得给出它的标定。出厂"
-             "文件也读不出来时才在终端里列候选让你选。标定文件由 "
-             "litegrip-studio / litegrip-console 对着真机标定后保存得到",
+             "文件也读不出来就直接退出，让你显式给 --calib——样例不去扫盘猜一份。"
+             "标定文件由 litegrip-studio / litegrip-console 对着真机标定后保存得到",
     )
     parser.add_argument(
         "--list-calibrations", action="store_true",
-        help="列出候选标定文件及其端点后退出（不连真机、不发帧）",
+        help="列出本机候选标定文件及其端点后退出（纯查询，不连真机、不发帧；"
+             "把列出的路径喂给 --calib 即可换成那份）",
     )
     parser.add_argument(
         "--no-can-setup", action="store_true",
@@ -451,18 +456,25 @@ def add_hardware_args(parser: argparse.ArgumentParser) -> None:
 
 
 def list_calibrations(out=print) -> int:
-    """``--list-calibrations``：打印候选标定文件。返回退出码。"""
+    """``--list-calibrations``：打印候选标定文件，返回退出码。
+
+    **纯查询**：不连真机、不发帧，也不改变默认标定——默认永远是 SDK 包里那份
+    出厂标定。它只有一个用途：把路径找出来，喂给 ``--calib``。
+    """
     from litegrip_mujoco import describe_candidate, discover_calibrations
 
     candidates = discover_calibrations()
     if not candidates:
         out("没有找到候选标定文件。标定文件由上位机（GUI）标定后生成，")
         out("默认写在 ~/.litegrip/，也可以放在当前目录。")
+        out("不给 --calib 时用的是 SDK 包里那份出厂标定，不必在这里选。")
         return 0
-    out(f"候选标定文件（{len(candidates)} 个；SDK 自带的出厂标定不在其中）:")
+    out(f"候选标定文件（{len(candidates)} 个；SDK 自带的出厂标定不在其中——"
+        "它就是不给 --calib 时的默认值）:")
     for index, path in enumerate(candidates, start=1):
         out(f"  {index}) {path}")
         out(f"     {describe_candidate(path)}")
+    out("   要用其中一份：--calib <上面的路径>")
     return 0
 
 
@@ -509,9 +521,9 @@ def factory_calibration_path() -> Path | None:
     # 只想知道一个文件在哪。
     #
     # 找错的风险说清楚：SDK 若把出厂标定挪到别处（它声明的 ``_FACTORY_CALIB``），
-    # 这里就会漏掉，于是退回「列出候选让人选」——非交互环境里直接失败，是响的，
-    # 不是错的。反过来找**对**了而库层不认识它（同一份文件、两条路径），库层的
-    # 拒绝会照常触发，也是一条明确的报错。
+    # 这里就会漏掉，于是退回库层的两档选择——它自己也按包目录找，同样漏掉的话就
+    # 直接报错退出，是响的，不是错的。反过来找**对**了而库层不认识它（同一份
+    # 文件、两条路径），库层会把它当普通文件校验，端点不符时照常报错。
     directory = sdk_dir()
     if directory is not None:
         candidate = directory / "litegrip" / "factory_calibration.json"
@@ -520,35 +532,44 @@ def factory_calibration_path() -> Path | None:
     return None
 
 
-def choose_calibration_file(requested=None, *, factory=None, ask=None, out=print):
-    """定下这次用哪份标定文件。三档，**顺序就是优先级**。
+def is_sdk_factory_calibration(path, factory) -> bool:
+    """``path`` 是不是 SDK 包里那份出厂标定（``factory`` 由上面那个函数给出）。
 
-    * ``--calib <路径>``（``requested``）：直接用，不提问；只做校验。
-    * ``factory`` 给了且读得出来：用 SDK 包里那份出厂标定，**不提问**，只打一行
-      说明。这是默认路径——``factory`` 由调用方用
-      :func:`factory_calibration_path` 算出来，所以它跟着包走，换电脑也一样。
-    * 出厂标定也读不出来（SDK 装得残缺、文件被删）：才回到选择器——列出候选让
-      操作员当场选；非交互（stdin 不是 tty、EOF）或没有候选就直接退出。
+    按 ``realpath`` 比，符号链接、``..`` 这些写法都算同一份。两边任一为 ``None``
+    就是否——**没有出厂标定**与**用了出厂标定**不能混为一谈。
+    """
+    if path is None or factory is None:
+        return False
+    return os.path.realpath(str(path)) == os.path.realpath(str(factory))
+
+
+def choose_calibration_file(requested=None, *, factory=None, out=print):
+    """定下这次用哪份标定文件。两档，**顺序就是优先级**。
+
+    * ``--calib <路径>``（``requested``）：直接用，只做校验。
+    * ``factory`` 给了且读得出来：用 SDK 包里那份出厂标定，只打一行说明。这是
+      默认路径——``factory`` 由调用方用 :func:`factory_calibration_path` 算出来，
+      所以它跟着包走，换电脑也一样。
+
+    两档都没成（``--calib`` 没给，出厂标定也读不出来）就**直接退出**，让人显式
+    给出 ``--calib``。这里**不扫盘、不提问**：样例不去猜 ``~/.litegrip`` 下哪份
+    JSON 是这台夹爪的，猜错了就是把另一台机器的尺寸驱动到真机上。想在这些文件里
+    挑一份，用 ``--list-calibrations`` 看列表，再把路径喂给 ``--calib``。
 
     出厂标定是**台架夹具的实测参数**，不是每台夹爪各自量的：它是一份能用的默认
     值，不是「这台夹爪的标定」。要按这台夹爪自己的尺寸驱动，用 ``--calib`` 指
     上位机保存的那份——所以第 2 档那行提示必须把这句话说出来。
 
-    返回的第二个值说明「这是出厂标定」——真机路径要把它转成
-    :func:`apply_calibration` 的 ``allow_factory=True``，否则库层会按设计拒掉它
-    （它属于任何一台夹爪，也就不属于这一台）。
-
     Args:
         requested: ``--calib`` 的值（``None`` = 没给）。
-        factory: 出厂标定文件的路径；``None`` 表示调用方拿不到 SDK，直接进选择器。
-        ask: 取输入的函数（默认 ``input``）——测试注入用。
+        factory: 出厂标定文件的路径；``None`` 表示调用方拿不到 SDK。
         out: 打印函数（默认 ``print``）——测试注入用。
 
     Returns:
-        ``(路径, 是不是出厂标定)``。路径已校验存在、可解析、字段齐、端点自洽。
+        选中的标定文件路径（已校验存在、可解析、字段齐、端点自洽）。
 
     Raises:
-        SystemExit: 没得选、或者选不出来。
+        SystemExit: 两档都没有可用文件；信息里给出 ``--calib`` 的用法。
     """
     from litegrip_mujoco import (
         CalibrationError,
@@ -563,24 +584,29 @@ def choose_calibration_file(requested=None, *, factory=None, ask=None, out=print
             load_calibration_file(path)
         except CalibrationError as exc:
             raise SystemExit(f"{exc}") from exc
-        return path, False
+        return path
 
     if factory is not None:
         path = os.path.abspath(os.path.expanduser(str(factory)))
         try:
             load_calibration_file(path)
         except CalibrationError as exc:
-            out(f"（SDK 自带的出厂标定读不出来：{exc}）")
-        else:
-            out(f"未指定 --calib：使用 SDK 自带的出厂标定 {path}")
-            out("   （台架夹具的实测参数，不是这台夹爪自己量的。"
-                "换 --calib <路径> 指这台夹爪的那份。）")
-            return path, True
+            # 出厂文件不在 / 坏了：这里**不**退回候选列表，直接说清楚怎么办。
+            raise SystemExit(
+                f"没有指定 --calib，SDK 自带的出厂标定也读不出来：{path}\n"
+                f"   （{exc}）\n"
+                "   样例不会去扫盘替你挑一份。请显式指定这台夹爪的标定：\n"
+                "     --calib <路径>\n"
+                "   要看看本机有哪些候选：--list-calibrations"
+            ) from None
+        out(f"未指定 --calib：使用 SDK 自带的出厂标定 {path}")
+        out("   （台架夹具的实测参数，不是这台夹爪自己量的。"
+            "换 --calib <路径> 指这台夹爪的那份。）")
+        return path
 
     try:
-        # 库层的选择器：扫默认目录 + 当前目录，按新旧排，非交互直接报错退出。
-        # 它**不会**替你挑一份默认的——这正是这一档存在的意义。
-        return resolve_calibration_path(None, input_fn=ask), False
+        # 库层同样的两档，只是它拿不到上面那个 factory 参数——它自己按包目录找。
+        return resolve_calibration_path(None)
     except CalibrationRequiredError as exc:
         raise SystemExit(f"{exc}") from exc
 
@@ -1243,10 +1269,11 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
     → enable。
 
     标定在**连接之前**就定下来（:func:`choose_calibration_file`）：``--calib``
-    给的优先，没给就用 SDK 包里那份出厂标定，出厂文件也读不出来才在终端里选。
-    载入走库层的 :func:`~litegrip_mujoco.apply_calibration`，它会逐个字段核实
-    「生效的确实是这一份」——SDK 在文件读不出来时会**静默**改用出厂标定并照样返回
-    ``True``，光看返回值不够。
+    给的优先，没给就用 SDK 包里那份出厂标定；出厂文件也读不出来就直接退出，让你
+    显式给 ``--calib``。载入走库层的
+    :func:`~litegrip_mujoco.apply_calibration`，它会逐个字段核实「生效的确实是
+    这一份」——SDK 在文件读不出来时会**静默**改用出厂标定并照样返回 ``True``，
+    光看返回值不够。
 
     ``--dry-run`` **不导入 SDK**：它不碰 CAN，而 ``import litegrip`` 在没装
     SocketCAN 依赖的机器上会失败。它也因此不依赖任何标定——替身的刻度是它自己
@@ -1273,14 +1300,13 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
         apply_calibration,
     )
 
-    if args.list_calibrations:
-        raise SystemExit(list_calibrations())
-
+    factory = factory_calibration_path()
     try:
-        calib_path, is_factory = choose_calibration_file(
-            args.calib, factory=factory_calibration_path())
+        calib_path = choose_calibration_file(args.calib, factory=factory)
     except SystemExit:
-        if not dry_run:
+        if not dry_run or args.calib:
+            # 显式点名的那份有问题就是错，--dry-run 也不吞：那多半是路径打错了字，
+            # 而信错的路径比看不见路径更糟。
             raise
         # --dry-run 没碰 CAN，也就不依赖任何标定：替身的刻度是它自己带的
         # （真机口径的 θ 端点）。这里只放弃「显示这份文件」这一步，不放弃整场演示。
@@ -1288,15 +1314,20 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
               "也没找到 SDK 出厂标定）")
         print("          替身不受影响：它的刻度是自己的，不读标定文件。"
               "要让这里显示某一份，用 --calib <路径>")
-        calib_path, is_factory = None, False
+        calib_path = None
 
     if calib_path is not None:
         calibration = read_calibration_file(calib_path)
         notes = check_calibration_matches_args(
             calibration, channel=args.channel, can_id=args.can_id,
             mst_id=args.mst_id)
+        # 「是不是出厂那份」按**本层**resolve 出来的那个路径比，而不问库层的
+        # ``calibration.is_sdk_factory_path``：库层只从 sys.path 上找 SDK，而这里
+        # 的 factory 还会看 $LITEGRIP_SDK_DIR 与同级检出——同一个文件，两边不一定
+        # 都认得。标签要跟这次真正用的那份文件走。
         print(f"   [真机] 标定 {calib_path}"
-              + ("（SDK 出厂标定）" if is_factory else ""))
+              + ("（SDK 出厂标定）" if is_sdk_factory_calibration(calib_path, factory)
+                 else ""))
         print(f"          {calibration_summary(calibration.raw)}")
         for note in notes:
             print(note)
@@ -1327,12 +1358,10 @@ def open_real_gripper(args, enable: bool = True, *, dry_run: bool = False,
         if not gripper.connect():
             raise SystemExit(connect_failure_message(args.channel))
         # 标定必须在 enable 之前载入：SDK 的毫米刻度依赖它，轨迹的归一化开度也是。
-        # allow_factory 只在选中的是 SDK 出厂那份时为真——库层默认拒它（它不属于
-        # 任何一台具体夹爪），例程这一层把它打开是因为「没给 --calib」的默认行为
-        # 就是用它，而上面已经把这句话打出来了。
+        # 出厂标定在这条路径上就是一份普通文件——库层照常校验端点，上面也已经
+        # 把「这是台架夹具的参数」那句话打出来了。
         try:
-            applied = apply_calibration(gripper, calib_path,
-                                        allow_factory=is_factory)
+            applied = apply_calibration(gripper, calib_path)
         except CalibrationError as exc:
             gripper.disconnect()
             raise SystemExit(f"标定没载入成功：\n{exc}") from exc

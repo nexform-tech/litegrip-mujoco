@@ -14,9 +14,10 @@
   Z               运行中随时在失力 / 使能之间切换（--passive 与 --dry-run 下无效）
   Esc / Q         退出（退出前会失能：手指会松、夹着的东西会掉）
 
-前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK · 有一份
-      这台夹爪的标定（不给 --calib 就用 SDK 出厂那份）。装 SDK、选标定、为什么
-      「只是看」也得发帧见 examples/README.zh-CN.md。
+前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK（不给
+      --calib 就用它自带的出厂标定；要按这台夹爪自己的尺寸驱动，用 --calib 指
+      上位机保存的那份）。装 SDK、选标定、为什么「只是看」也得发帧见
+      examples/README.zh-CN.md。
 """
 import argparse
 import math
@@ -30,6 +31,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_mujoco)
     add_hardware_args,
     fraction_to_gap_mm,
     fresh_state,
+    list_calibrations,
     make_sim,
     open_real_gripper,
     rad_to_fraction,
@@ -152,6 +154,10 @@ def drive_stand_in(real, stop: threading.Event) -> None:
 
 def main():
     args = parse_args()
+    # 放在最前面：`--list-calibrations` 是一次查询，不该受 --dry-run / --passive
+    # 的影响，也不该先去找 SDK。
+    if args.list_calibrations:
+        return list_calibrations()
 
     print("样例 04 · 镜像模式（真机 → 仿真）")
     if args.dry_run:

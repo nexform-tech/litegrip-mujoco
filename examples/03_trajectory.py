@@ -16,9 +16,10 @@
 注意: 回放结束后手指停在轨迹终点，不会自己回去；录制期间别让别的程序同时驱动这台
       夹爪。
 
-前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK · 有一份
-      这台夹爪的标定（不给 --calib 就用 SDK 出厂那份）。装 SDK、选标定、0xD 通信
-      超时故障见 examples/README.zh-CN.md。
+前提: 真机接在 CAN 总线（默认 can0，用 --channel 换）· 装好 litegrip SDK（不给
+      --calib 就用它自带的出厂标定；要按这台夹爪自己的尺寸驱动，用 --calib 指
+      上位机保存的那份）。装 SDK、选标定、0xD 通信超时故障见
+      examples/README.zh-CN.md。
 """
 import argparse
 import math
@@ -32,6 +33,7 @@ from _common import (  # noqa: I001  (必须先于 litegrip_mujoco)
     check_sdk_api,
     fraction_to_gap_mm,
     import_litegrip,
+    list_calibrations,
     make_sim,
     open_real_gripper,
     rad_to_fraction,
@@ -483,6 +485,10 @@ def play_offline(sim, trajectory, args):
 
 def main():
     args = parse_args()
+    # 放在最前面：`--list-calibrations` 是一次查询，不该受 --dry-run / --play /
+    # --headless 的影响，也不该先去找 SDK。
+    if args.list_calibrations:
+        return list_calibrations()
     # --dry-run 的默认录制时长：不给 --record 就录满一条余弦周期多一点。
     if args.dry_run and args.record <= 0:
         args.record = DRY_RUN_PERIOD_S + 0.5
