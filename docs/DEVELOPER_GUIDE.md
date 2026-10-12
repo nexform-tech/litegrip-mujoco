@@ -25,7 +25,7 @@ src/litegrip_mujoco/
 
 | Source | Provides |
 | --- | --- |
-| `litegrip-description/urdf/litegrip_urdf.urdf.xacro` + 3 STLs | All geometry, inertia and joint origins |
+| `litegrip-description/urdf/litegrip_description.urdf.xacro` + 3 STLs | All geometry, inertia and joint origins |
 | `lite-grip` (the SDK) | Control semantics, units, `grasp()` stall logic, error types |
 | `litearm-mujoco` | Package shape, example numbering, controller structure |
 

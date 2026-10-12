@@ -25,7 +25,7 @@ src/litegrip_mujoco/
 
 | 来源 | 提供什么 |
 | --- | --- |
-| `litegrip-description/urdf/litegrip_urdf.urdf.xacro` + 3 个 STL | 全部几何、惯量、关节原点 |
+| `litegrip-description/urdf/litegrip_description.urdf.xacro` + 3 个 STL | 全部几何、惯量、关节原点 |
 | `lite-grip`（SDK） | 控制语义、单位、`grasp()` 堵转逻辑、异常类型 |
 | `litearm-mujoco` | 包形态、例程编号、控制器结构 |
 
